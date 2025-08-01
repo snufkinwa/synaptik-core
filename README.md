@@ -68,7 +68,7 @@ MIT License. Use it, fork it, remix it — just cite the project and respect the
 
 **Janay Harris**  
 Independent AI Architect & Researcher | Cloud Developer  
-[LinkedIn](https://www.linkedin.com/in/janayharris) | janayharris@synaptik-core.dev
+[LinkedIn](https://www.linkedin.com/in/janay-codes/) | janayharris@synaptik-core.dev
 
 
 ## Citation
