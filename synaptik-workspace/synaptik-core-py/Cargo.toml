@@ -1,0 +1,12 @@
+[package]
+name = "synaptik-core-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "synaptik_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22.4", features = ["extension-module"] }
+synaptik-core = { path = "../synaptik-core" }

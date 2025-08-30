@@ -1,85 +1,160 @@
-# 🧠 synaptik-core (WIP)
+![Synaptik Logo](./images/synaptik-logo.png)
 
 **Toward Trustworthy AGI — a lightweight cognitive architecture for ethical, agentic intelligence.**
 
+---
 
-## What is synaptik-core?
+##  What is synaptik-core?
 
-`synaptik-core` is an experimental cognitive framework that combines **LLMs**, **symbolic reasoning**, and **moral contract enforcement** to create agents that are:
+`synaptik-core` is a hybrid cognitive memory and ethics engine built in **Rust** with **Python bindings** via PyO3.
+It enables **GPT-OSS-based agents** to store memory, reason over time, and enforce cryptographic moral alignment — all while staying **local**, **auditable**, and **edge-deployable**.
 
-- Ethically aligned  
--  Memory-capable (stateful)  
-- ⚡ Edge-deployable  
--  Auditable and interpretable
+This system addresses key limitations in modern LLMs:
 
-This project addresses key limitations in modern AI: statelessness, hallucination, lack of transparency, and ethical ambiguity.
+* **Ethical ambiguity** → solved through cryptographically patchable **Moral Contracts**
+*  **Statelessness** → solved with persistent, structured **Memory DAGs**
+* **Unbounded autonomy** → filtered through deterministic **Ethos Validator**
+* **Cloud dependency** → solved with fully **local model and storage support**
 
-##  Architecture Overview
+---
 
-The system is built on three core layers:
+## Architecture Flow: Ethos → Memory → Prompt
 
-| Component          | Description                                                                 |
-|--------------------|-----------------------------------------------------------------------------|
-| **DAG Memory**     | A Directed Acyclic Graph for long-term, symbolic memory and planning.       |
-| **SQLite Cache**   | A synthetic hippocampus for fast recall of recent interactions.             |
-| **Moral Contracts**| Declarative, enforceable ethical rules evaluated by a dedicated agent.      |
+```mermaid
+graph TD
+    subgraph Shared
+        Audit["🧾 Auditor Log"]
+        Contracts["📜 Moral Contracts (WASM)"]
+        Contracts --> EthosValidator["🛡️ Ethos Validator"]
+    end
 
-These are managed by modular, collaborative agents:
+    subgraph Agent
+        AgentInterface["🤖 Agent Interface (Pooks or Basil)"]
+        LocalMem["📁 .cogniv/ (SQLite + DAG)"]
+    end
 
-- **Ethos Agent** – Evaluates prompts and actions against moral contracts  
-- **Librarian Agent** – Retrieves and indexes memory  
-- **Memory Agent** – Handles caching, pruning, and DAG updates  
-- **Execution Agent** – Generates responses and takes actions  
-- **Audit Agent** – Logs key decisions to an immutable ledger or cold storage  
+    AgentInterface --> EthosValidator
+    EthosValidator -->|Fail| Reject["Reject or Rephrase Prompt"] --> Audit
+    EthosValidator -->|Pass| Recall["Recall Memory"] --> Prompt["LLM Prompt Build"]
+    Prompt --> Gen["LLM Response"]
+    Gen --> Commit["Commit Memory"] --> LocalMem
+```
 
+Each agent has its **own `.cogniv/` folder** with separate memory and local reasoning.
+Only moral contract evaluation and anonymized audit logs are shared, only when Ethos Validator rejects a prompt or response.
+
+This separation ensures agents can learn and reason independently while upholding common ethical boundaries.
+---
+
+##  Core Modules
+
+| Component           | Description                                                          |
+| ------------------- | -------------------------------------------------------------------- |
+| **Moral Contracts** | WASM-style rules for ethical validation; decentralized and patchable |
+| **Ethos Validator** | Filters all inputs/outputs before memory or model execution          |
+| **SQLite Cache**    | Fast-access short-term memory (synthetic hippocampus)                |
+| **DAG Memory**      | Git-style Directed Acyclic Graph for symbolic long-term memory       |
+| **Auditor Log**     | Shared tamper-resistant record of rejected/approved ethical events   |
+
+Agents orchestrate the flow:
+
+* **Librarian** – Routes memory queries across cache and DAG
+* **Memory Agent** – Adds, prunes, and evolves DAG memory
+* **Ethos Agent** – Validates actions using shared moral contracts
+* **Audit Agent** – Anonymously logs decisions for shared ethical context
+
+---
+
+## How It Works with GPT-OSS
+
+```python
+from transformers import pipeline
+from synaptik_core import recall_memory, commit_memory, evaluate_ethics
+
+# Load local GPT-OSS model
+model_id = "openai/gpt-oss-20b" 
+agent = pipeline("text-generation", model=model_id, torch_dtype="auto", device_map="auto")
+
+# Step 1: Validate prompt
+if not evaluate_ethics("What should I do about my friend who lied?"):
+    raise Exception("⚠️ Rejected by Ethos Validator")
+
+# Step 2: Recall memory
+context = recall_memory("user:trust issues")
+
+# Step 3: Build prompt
+prompt = f"Context: {context}\n\nUser: What should I do about my friend who lied?\nAssistant:"
+
+# Step 4: Generate
+response = agent(prompt, max_new_tokens=256)[0]["generated_text"]
+
+# Step 5: Ethics check + commit
+if evaluate_ethics(response):
+    commit_memory(f"Trust repair advice: {response}")
+else:
+    print("⚠️ Response rejected by moral contract.")
+```
+
+---
+
+## 🛠️ Tech Stack
+
+| Tech               | Role                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| **Rust / PyO3**    | Core memory logic, DAG structure, and ethical validation                                      |
+| **Python**         | Agent orchestration and local LLM integration                                                 |
+| **SQLite**         | Fast short-term memory cache                                                                  |
+| **Custom DAG**     | Immutable, content-addressed symbolic memory graph                                            |
+| **WASM Contracts** | Secure, cryptographically patchable moral contract validation engine                          |
+| **OpenAI OSS**     | Local model inference (`gpt-oss-20b` / `gpt-oss-120b`) for reflection, generation, and dialog |
+
+---
 
 ## Use Cases
 
-- AI safety research  
-- Explainable AI (XAI) systems  
-- Cognitive agents for sensitive domains (health, education, law)  
-- Memory-augmented LLMs for edge devices  
+* **LLM memory backends** for offline/local agents
+* **Privacy-respecting AI companions** with enforceable alignment
+* **Auditable cognition** in law, education, mental health
+* **Research sandbox** for memory + ethics in agentic AI
+* **Edge intelligence** for Raspberry Pi, Jetson, and WASM targets
 
-## Tech Stack
+---
 
-| Tech                | Role                                                                                                                         |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Rust / Python**   | Core logic implementation (currently WIP in Rust; Python used for prototypes and orchestration)                              |
-| **SQLite**          | Fast-access working memory for recent or frequently used information                                                         |
-| **IPFS**            | Cold memory archiving. Used to offload large or infrequently accessed nodes and audit logs to a decentralized storage layer. |
-| **DAG**             | Immutable memory graph. Planned as a tamper-proof audit trail of agent decisions, ethical evaluations, and memory updates.   |
-| **OpenAI** | LLM-based reasoning and generation. Handles reflection, inference, and dialog components within the agentic system.          |
+##  Project Status
 
+* ✅ DAG memory (symbolic nodes, pruning, recall)
+* ✅ SQLite cache layer (recency-based)
+* ✅ PyO3 bridge for Python access
+* ✅ Modular `.cogniv/` folder per agent
+* 🔜 WASM contract evaluator for moral enforcement
+* 🔜 CLI agent (**Pooks**) and voice agent (**Basil**)
 
-## 🚧 Project Status
-
-`synaptik-core` is in **early development**. The current prototype demonstrates:
-
-- The current prototype demonstrates a limited DAG-based symbolic memory that supports adding, retrieving, and pruning memory nodes
-
-
+---
 
 ## License
 
-MIT License. Use it, fork it, remix it — just cite the project and respect the mission.
+Licensed under **Apache License 2.0** — see [LICENSE](./LICENSE).
 
+> Free to use, fork, remix, and build upon. Preserve the author and ethical mission.
 
-## Author
+---
 
-**Janay Harris**  
-Independent AI Architect & Researcher | Cloud Developer  
-[LinkedIn](https://www.linkedin.com/in/janay-codes/) | janayharris@synaptik-core.dev
+## 👤 Author
 
+**Janay Harris**
+AI Architect · Cloud Dev · Ethics Researcher
+[LinkedIn](https://www.linkedin.com/in/janay-codes/) · [janayharris@synaptik-core.dev](mailto:janayharris@synaptik-core.dev)
 
-## Citation
+---
 
-If you're referencing the ideas or architecture in academic work:
+## 📚 Citation
 
-> Harris, J. (2025). *synaptik-core: Toward Trustworthy AGI via Hybrid Cognitive Architecture*. ColorStack Summit 2025.
+> Harris, J. (2025). *Synaptik-Core: Toward Trustworthy AGI via Hybrid Cognitive Architecture*. ColorStack Summit 2025.
 
+---
 
+## 🌍 Vision
 
-##  Vision
-
-This is a step toward cognitive agents that can **remember**, **reason**, and **act with integrity** even in ambiguous, real-world contexts.
-
+> Intelligence without memory is reactive.
+> Intelligence without ethics is dangerous.
+> **Synaptik Core is the foundation for both.**

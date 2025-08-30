@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "synaptik-core",
+  "contracts",
+  "synaptik-core-py",
+]
+resolver = "2"

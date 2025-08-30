@@ -1,1 +1,0 @@
-Today I began testing my synthetic memory system.
