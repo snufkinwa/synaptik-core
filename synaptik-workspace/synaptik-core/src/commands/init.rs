@@ -47,7 +47,6 @@ pub fn ensure_initialized() -> Result<InitReport> {
     ensure_dir(&root, "dag", &mut created, &mut existed)?;
     ensure_dir(&root, "archive", &mut created, &mut existed)?;
     ensure_dir(&root.join("archive"), "objects", &mut created, &mut existed)?;
-    ensure_dir(&root, "agents", &mut created, &mut existed)?;
     ensure_dir(&root, "logbook", &mut created, &mut existed)?;
 
     // HEAD ref (Git-like)

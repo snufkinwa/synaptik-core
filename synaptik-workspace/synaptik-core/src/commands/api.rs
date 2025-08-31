@@ -9,18 +9,37 @@ use crate::services::ethos::{decision_gate, precheck, Decision};
 use crate::services::librarian::Librarian;
 use crate::services::memory::Memory;
 
+use crate::commands::init::ensure_initialized_once;
+
 pub struct Commands {
     memory: Memory,       // one SQLite connection here
     librarian: Librarian, // no DB inside
 }
 
 impl Commands {
-    pub fn new(db_path: &str, archivist: Option<Archivist>) -> Result<Self> {
-        Ok(Self {
-            memory: Memory::open(db_path)?,
-            librarian: Librarian::new(archivist),
-        })
+    // Keep the signature for now; ignore the args. Prefix with _ to silence warnings.
+    pub fn new(_db_path: &str, _archivist: Option<Archivist>) -> Result<Self> {
+        let report = ensure_initialized_once()?;
+
+        // Hard-coded canonical locations
+        let cache_db = report.root.join("cache").join("memory.db");
+        let archive_root = report.root.join("archive");
+
+        // If Memory::open takes &str:
+        let memory = Memory::open(
+            cache_db
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid UTF-8 db path"))?,
+        )?;
+
+        // Pass by value (impl Into<PathBuf>)
+        let archivist = Archivist::open(archive_root)?;
+        let librarian = Librarian::new(Some(archivist));
+
+        // Build directly (since from_parts doesn't exist)
+        Ok(Self { memory, librarian })
     }
+
 
     pub fn remember(&self, lobe: &str, key: Option<&str>, content: &str) -> Result<String> {
         record_action("commands", "remember_called", &json!({"lobe": lobe, "key_is_some": key.is_some()}), "low");

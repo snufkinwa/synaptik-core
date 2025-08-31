@@ -17,6 +17,8 @@ use synaptik_core::services::librarian::Librarian;
 use synaptik_core::services::lobes::LobeStore;
 use synaptik_core::services::memory::Memory;
 
+use synaptik_core::commands::ensure_initialized_once;
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn tmp_path(name: &str) -> PathBuf {
@@ -38,9 +40,8 @@ fn open_sqlite<P: AsRef<Path>>(p: P) -> Connection {
 
 #[test]
 fn commands_remember_reflect_stats() {
-    // Arrange
-    let db_path = tmp_path("mem.sqlite3");
-    let cmds = Commands::new(db_path.to_str().unwrap(), None).expect("commands new");
+    // Commands resolves canonical paths internally; the db_path arg is ignored.
+    let cmds = Commands::new("ignored", None).expect("commands new");
 
     // Act: remember (always summarizes)
     let content = "User prefers concise explanations. They like short answers. This is a test.";
@@ -55,8 +56,11 @@ fn commands_remember_reflect_stats() {
     assert!(stats.total >= 1, "at least one row should exist");
     assert!(stats.last_updated.is_some());
 
-    // Assert: reflection column exists for this row
+    // Ask init where the real DB is and assert against it (no env var needed)
+    let report = ensure_initialized_once().expect("init");
+    let db_path = report.root.join("cache").join("memory.db");
     let conn = open_sqlite(&db_path);
+
     let got_reflection: Option<String> = conn
         .query_row(
             "SELECT reflection FROM memories WHERE memory_id=?1",
@@ -66,6 +70,7 @@ fn commands_remember_reflect_stats() {
         .ok();
     assert!(got_reflection.is_some());
 }
+
 
 #[test]
 fn librarian_promote_to_archive_and_restore() {
