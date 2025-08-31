@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use blake3;
+use std::{thread, time::Duration};
 
 use rusqlite::Connection;
 
@@ -146,4 +148,86 @@ fn memory_open_and_basic_io() {
         )
         .ok();
     assert_eq!(sum.as_deref(), Some("short summary"));
+}
+
+#[test]
+fn memory_promote_all_hot_in_lobe_linear_chain() {
+    // Arrange
+    let db_path = tmp_path("mem.sqlite3");
+    let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
+
+    // Write three hot rows in the same lobe. Space them slightly to stabilize created_at order.
+    let id1 = "chat_001";
+    let id2 = "chat_002";
+    let id3 = "chat_003";
+
+    let c1 = b"first payload";
+    let c2 = b"second payload";
+    let c3 = b"third payload";
+
+    mem.remember(id1, "chat", "k1", c1).expect("remember 1");
+    thread::sleep(Duration::from_millis(5));
+    mem.remember(id2, "chat", "k2", c2).expect("remember 2");
+    thread::sleep(Duration::from_millis(5));
+    mem.remember(id3, "chat", "k3", c3).expect("remember 3");
+
+    // Act: promote all hot rows in lobe (oldest → newest)
+    let promoted = mem.promote_all_hot_in_lobe("chat").expect("promote_all");
+    assert_eq!(promoted.len(), 3, "should promote all three rows");
+
+    // Expect promotion order follows created_at ASC (id1, id2, id3)
+    assert_eq!(promoted[0].0, id1);
+    assert_eq!(promoted[1].0, id2);
+    assert_eq!(promoted[2].0, id3);
+
+    // Assert: archived_cid is blake3(content)
+    let exp1 = blake3::hash(c1).to_hex().to_string();
+    let exp2 = blake3::hash(c2).to_hex().to_string();
+    let exp3 = blake3::hash(c3).to_hex().to_string();
+
+    assert_eq!(promoted[0].1, exp1);
+    assert_eq!(promoted[1].1, exp2);
+    assert_eq!(promoted[2].1, exp3);
+
+    // Assert: DB reflects archived_cid and archived_at is set
+    let conn = open_sqlite(&db_path);
+    for (id, exp_cid) in &promoted {
+        let (cid, at): (Option<String>, Option<String>) = conn.query_row(
+            "SELECT archived_cid, archived_at FROM memories WHERE memory_id=?1",
+            [id.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).expect("row exists");
+        assert_eq!(cid.as_deref(), Some(exp_cid.as_str()));
+        assert!(at.is_some(), "archived_at should be set for {}", id);
+    }
+
+    // Re-promoting should do nothing (already archived)
+    let again = mem.promote_all_hot_in_lobe("chat").expect("promote_all again");
+    assert!(again.is_empty(), "no hot rows left to promote");
+}
+
+#[test]
+fn memory_promote_latest_hot_in_lobe_single() {
+    // Arrange
+    let db_path = tmp_path("mem2.sqlite3");
+    let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
+
+    // One archived row and one still hot
+    mem.remember("chat_a1", "chat", "a1", b"old").expect("remember a1");
+    mem.promote_all_hot_in_lobe("chat").expect("promote a1"); // archive the first
+
+    // new hot row
+    mem.remember("chat_a2", "chat", "a2", b"new").expect("remember a2");
+
+    // Act: promote only the most recent hot row
+    let one = mem.promote_latest_hot_in_lobe("chat").expect("promote latest");
+    assert!(one.is_some(), "should promote one row");
+    let (id, cid) = one.unwrap();
+
+    assert_eq!(id, "chat_a2");
+    assert_eq!(cid, blake3::hash(b"new").to_hex().to_string());
+
+    // Next call should find nothing hot
+    let none = mem.promote_latest_hot_in_lobe("chat").expect("promote latest none");
+    assert!(none.is_none());
 }

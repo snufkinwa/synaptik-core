@@ -29,7 +29,7 @@ graph TD
     end
 
     subgraph Agent
-        AgentInterface["🤖 Agent Interface (Pooks or Basil)"]
+        AgentInterface["🤖 Agent Interface"]
         LocalMem["📁 .cogniv/ (SQLite + DAG)"]
     end
 
@@ -77,7 +77,7 @@ agent = pipeline("text-generation", model=model_id, torch_dtype="auto", device_m
 
 # Step 1: Validate prompt
 if not evaluate_ethics("What should I do about my friend who lied?"):
-    raise Exception("⚠️ Rejected by Ethos Validator")
+    raise Exception(" Rejected by Ethos Validator")
 
 # Step 2: Recall memory
 context = recall_memory("user:trust issues")
@@ -92,7 +92,7 @@ response = agent(prompt, max_new_tokens=256)[0]["generated_text"]
 if evaluate_ethics(response):
     commit_memory(f"Trust repair advice: {response}")
 else:
-    print("⚠️ Response rejected by moral contract.")
+    print(" Response rejected by moral contract.")
 ```
 
 ---
@@ -122,12 +122,12 @@ else:
 
 ##  Project Status
 
-* ✅ DAG memory (symbolic nodes, pruning, recall)
-* ✅ SQLite cache layer (recency-based)
-* ✅ PyO3 bridge for Python access
-* ✅ Modular `.cogniv/` folder per agent
-* 🔜 WASM contract evaluator for moral enforcement
-* 🔜 CLI agent (**Pooks**) and voice agent (**Basil**)
+* ✔ DAG memory (symbolic nodes, pruning, recall)
+* ✔ SQLite cache layer (recency-based)
+* ✔ PyO3 bridge for Python access
+* ✔ Modular `.cogniv/` folder per agent
+* ✔ WASM contract evaluator for moral enforcement
+* 🔜 CLI agent and voice agent (**Basil**)
 
 ---
 
@@ -139,7 +139,7 @@ Licensed under **Apache License 2.0** — see [LICENSE](./LICENSE).
 
 ---
 
-## 👤 Author
+## Author
 
 **Janay Harris**
 AI Architect · Cloud Dev · Ethics Researcher
@@ -147,13 +147,13 @@ AI Architect · Cloud Dev · Ethics Researcher
 
 ---
 
-## 📚 Citation
+## Citation
 
 > Harris, J. (2025). *Synaptik-Core: Toward Trustworthy AGI via Hybrid Cognitive Architecture*. ColorStack Summit 2025.
 
 ---
 
-## 🌍 Vision
+## Vision
 
 > Intelligence without memory is reactive.
 > Intelligence without ethics is dangerous.

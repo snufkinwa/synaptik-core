@@ -1,4 +1,0 @@
-{"ts":"2025-08-30T03:56:33.476949+00:00","event":"system_init","agent":"system","data":{"version":"1.0.0","architecture":"hybrid_tiered"}}
-{"constraints":[],"intent_category":"memory_storage","passed":true,"reason":"No violations detected.","requires_escalation":false,"risk":"Low","timestamp":"2025-08-30T03:56:33.481864+00:00"}
-{"constraints":[],"intent_category":"memory_storage","passed":true,"reason":"No violations detected.","requires_escalation":false,"risk":"Low","timestamp":"2025-08-30T05:00:15.788317+00:00"}
-{"constraints":[],"intent_category":"metadata_access","passed":true,"reason":"No violations detected.","requires_escalation":false,"risk":"Low","timestamp":"2025-08-30T05:00:15.790176+00:00"}

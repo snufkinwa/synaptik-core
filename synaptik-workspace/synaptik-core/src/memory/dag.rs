@@ -11,8 +11,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use blake3;
-use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{fs, io::Write, path::{Path, PathBuf}};
 
 use crate::commands::init::ensure_initialized_once;
@@ -57,8 +56,8 @@ struct StreamRef {
     updated_at: Option<String>,
 }
 
-fn stream_key(lobe: &str, _key: &str) -> String {
-    sanitize(lobe)
+fn stream_key(lobe: &str, key: &str) -> String {
+    format!("{}__{}", sanitize(lobe), sanitize(key))
 }
 
 fn sanitize(s: &str) -> String {
@@ -89,49 +88,58 @@ fn write_stream_ref(lobe: &str, key: &str, r: &StreamRef) -> Result<()> {
 pub fn save_node(
     id: &str,
     content_utf8: &str,
-    meta: &Value,
-    _parents: &[String],
-) -> Result<String> {
-    // extract stream
+    meta: &serde_json::Value,
+    parents: &[String],
+) -> anyhow::Result<String> {
     let lobe = meta.get("lobe").and_then(|v| v.as_str()).unwrap_or("unknown");
     let key  = meta.get("key").and_then(|v| v.as_str()).unwrap_or("default");
 
-    // compute simple hash (raw bytes of UTF-8 string)
     let h = blake3::hash(content_utf8.as_bytes()).to_hex().to_string();
 
-    // check last stream hash; if same, do nothing (idempotent repeat)
+    // load last state for (lobe,key)
     let mut sref = read_stream_ref(lobe, key)?;
     if sref.last_hash.as_deref() == Some(&h) {
-        // return current latest node id if present; else fabricate a stable name
         if let Some(latest) = sref.latest_node.clone() {
-            return Ok(latest);
+            return Ok(latest); // idempotent: nothing to write
         }
-        // fallthrough to write a node if no latest yet
+        // else: no latest yet — fall through and write one
     }
 
-    // construct new node filename: <ts>__<sanitized-id>.json
-    let ts = Utc::now().to_rfc3339();
+    let ts = chrono::Utc::now().to_rfc3339();
     let fname = format!("{}__{}.json", ts.replace(':', "-"), sanitize(id));
     let node_path = dag_nodes_dir()?.join(&fname);
 
-    // parent = previous latest in this stream (filename), if any
-    let parent = sref.latest_node.clone();
+    let parent = if !parents.is_empty() {
+        Some(parents[0].clone())
+    } else {
+        sref.latest_node.clone()
+    };
 
-    // keep node JSON small & human-readable
-    let node = json!({
+    let node = serde_json::json!({
         "id": id,
         "ts": ts,
         "lobe": lobe,
         "key": key,
-        "parent": parent,          // filename of previous node in this (lobe,key) stream
-        "hash": h,                 // content fingerprint (raw blake3 of utf8 bytes)
-        "content": content_utf8,   // MVP: inline the text; truncate upstream if huge
-        "meta": meta,
+        "parent": parent,
+        "hash": h,
+        "content": content_utf8,
+        "meta": {
+            "lobe":         meta.get("lobe").cloned().unwrap_or(serde_json::json!(lobe)),
+            "key":          meta.get("key").cloned().unwrap_or(serde_json::json!(key)),
+            "version_id":   meta.get("version_id").cloned().unwrap_or(serde_json::json!(null)),
+            "etag":         meta.get("etag").cloned().unwrap_or(serde_json::json!(null)),
+            "content_type": meta.get("content_type").cloned().unwrap_or(serde_json::json!(null)),
+            "created_at":   meta.get("created_at").cloned().unwrap_or(serde_json::json!(ts)),
+            "updated_at":   serde_json::json!(ts),
+            "cid":          meta.get("cid").cloned().unwrap_or(serde_json::json!(h)),
+            "summary_len":  meta.pointer("/summary")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.len()).unwrap_or(0),
+        },
     });
 
     write_atomic(&node_path, &serde_json::to_vec_pretty(&node)?)?;
 
-    // update stream ref
     sref.latest_node = Some(fname.clone());
     sref.last_hash = Some(h);
     sref.updated_at = Some(ts);
