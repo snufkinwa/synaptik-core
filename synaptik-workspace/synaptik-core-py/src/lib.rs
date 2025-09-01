@@ -1,45 +1,74 @@
-// synaptik-core-py/src/lib.rs
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use pyo3::exceptions::PyRuntimeWarning;
-use synaptik_core as core; 
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::PyTypeInfo;
 
-#[pyfunction]
-fn list_memories(limit: Option<usize>, py: Python<'_>) -> PyResult<PyObject> {
-    // Ensure the core is initialized (idempotent)
-    let _ = core::commands::init::ensure_initialized_once();
+use ::synaptik_core as core;
+use core::commands::Commands;
 
-    let items = core::commands::reflect::list_memories(limit)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-    let out = PyList::empty(py);
-    for it in items {
-        let d = PyDict::new(py);
-        d.set_item("id", it.id)?;
-        d.set_item("path", it.path.to_string_lossy().to_string())?;
-        d.set_item("timestamp", it.timestamp)?;
-        d.set_item("preview", it.preview)?;
-        out.append(d)?;
-    }
-    Ok(out.into())
+fn pyerr<E: std::fmt::Display>(e: E) -> PyErr {
+    PyRuntimeError::new_err(e.to_string())
 }
 
-#[pyfunction]
-fn read_memory(id_or_path: &str) -> PyResult<String> {
-    // Optional: ensure init here too
-    let _ = core::commands::init::ensure_initialized_once();
+#[pyclass]
+struct PyCommands {
+    inner: Commands,
+}
 
-    core::commands::reflect::read_memory(id_or_path)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+#[pymethods]
+impl PyCommands {
+    /// Construct using canonical .cogniv paths 
+    #[new]
+    fn new() -> PyResult<Self> {
+        // Ensure the core is initialized (idempotent)
+        core::commands::init::ensure_initialized_once().map_err(pyerr)?;
+        let inner = Commands::new("ignored", None).map_err(pyerr)?;
+        Ok(Self { inner })
+    }
+
+    #[pyo3(signature = (lobe, content, key=None))]
+    fn remember(&self, lobe: &str, content: &str, key: Option<&str>) -> PyResult<String> {
+        self.inner.remember(lobe, key, content).map_err(pyerr)
+    }
+
+    fn reflect(&self, lobe: &str, window: usize) -> PyResult<String> {
+        self.inner.reflect(lobe, window).map_err(pyerr)
+    }
+
+    // Optional arg also needs explicit signature when other non-Python params exist
+    #[pyo3(signature = (lobe=None))]
+    fn stats(&self, lobe: Option<&str>, py: Python<'_>) -> PyResult<PyObject> {
+        let s = self.inner.stats(lobe).map_err(pyerr)?;
+
+        let d = PyDict::new_bound(py);
+        d.set_item("total", s.total)?;
+        d.set_item("archived", s.archived)?;
+
+        let by_lobe = PyList::empty_bound(py);
+        for (l, c) in s.by_lobe {
+            by_lobe.append((l, c))?;
+        }
+        d.set_item("by_lobe", by_lobe)?;
+        d.set_item("last_updated", s.last_updated)?;
+
+        Ok(d.into_any().into_py(py))
+    }
+
+    fn root(&self) -> PyResult<String> {
+        let rep = core::commands::init::ensure_initialized_once().map_err(pyerr)?;
+        Ok(rep.root.to_string_lossy().to_string())
+    }
 }
 
 #[pymodule]
-fn synaptik_core_py(py: Python<'_>, m: &PyModule) -> PyResult<()> {
-    // Auto-init once on import; warn (don’t fail) if it has issues
+fn synaptik_core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Optional: warn if init fails (PyO3 0.22 warning API)
     if let Err(e) = core::commands::init::ensure_initialized_once() {
-        PyRuntimeWarning::warn(py, &format!("Init warning: {}", e), 0)?;
+        use pyo3::exceptions::PyRuntimeWarning;
+        let cat = PyRuntimeWarning::type_object_bound(py);
+        PyErr::warn_bound(py, &cat, &format!("Init warning: {e}"), 0)?;
     }
-    m.add_function(wrap_pyfunction!(list_memories, m)?)?;
-    m.add_function(wrap_pyfunction!(read_memory, m)?)?;
+
+    m.add_class::<PyCommands>()?;
     Ok(())
 }

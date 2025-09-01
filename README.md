@@ -1,133 +1,153 @@
-![Synaptik Logo](./images/synaptik-logo.png)
+![Synaptik Logo](./images/synaptik.png)
 
-**Toward Trustworthy AGI — a lightweight cognitive architecture for ethical, agentic intelligence.**
+# Synaptik Core
 
----
-
-##  What is synaptik-core?
-
-`synaptik-core` is a hybrid cognitive memory and ethics engine built in **Rust** with **Python bindings** via PyO3.
-It enables **GPT-OSS-based agents** to store memory, reason over time, and enforce cryptographic moral alignment — all while staying **local**, **auditable**, and **edge-deployable**.
-
-This system addresses key limitations in modern LLMs:
-
-* **Ethical ambiguity** → solved through cryptographically patchable **Moral Contracts**
-*  **Statelessness** → solved with persistent, structured **Memory DAGs**
-* **Unbounded autonomy** → filtered through deterministic **Ethos Validator**
-* **Cloud dependency** → solved with fully **local model and storage support**
+**AI Symbiosis, not just automation.**
+A lightweight cognitive kernel for agents: local memory, simple reflection, and auditable guardrails — designed to work *with* people and tools.
 
 ---
 
-## Architecture Flow: Ethos → Memory → Prompt
+## What is `synaptik-core`?
 
-```mermaid
-graph TD
-    subgraph Shared
-        Audit["🧾 Auditor Log"]
-        Contracts["📜 Moral Contracts (WASM)"]
-        Contracts --> EthosValidator["🛡️ Ethos Validator"]
-    end
+A small Rust library (with Python bindings) that gives LLM agents durable memory and simple, deterministic reflection:
 
-    subgraph Agent
-        AgentInterface["🤖 Agent Interface"]
-        LocalMem["📁 .cogniv/ (SQLite + DAG)"]
-    end
+* **Local-first workspace** — `.cogniv/` with `cache/memory.db` (SQLite) + `archive/` (content-addressed files).
+* **Single-writer Memory** — one SQLite handle, safe & idempotent init.
+* **Archivist** — file-only cold storage by BLAKE3 CID (no DB writes).
+* **Librarian** — orchestrates ingest: optional summarization for long inputs, plus a tiny keyword reflection seed.
+* **Commands** — high-level API: `remember`, `reflect`, `stats`.
+* **Audit / Ethos hooks** — actions are recorded to JSONL logbook; an ethos precheck gate is in place (TOML contract seeded).
 
-    AgentInterface --> EthosValidator
-    EthosValidator -->|Fail| Reject["Reject or Rephrase Prompt"] --> Audit
-    EthosValidator -->|Pass| Recall["Recall Memory"] --> Prompt["LLM Prompt Build"]
-    Prompt --> Gen["LLM Response"]
-    Gen --> Commit["Commit Memory"] --> LocalMem
+This gives agents structure and recall without cloud lock-in, and keeps behavior auditable for safety and trust.
+
+---
+
+## Architecture (MVP)
+
+```
+User / Agent
+   │
+   ├─► Commands  ──► Librarian ──► Memory (SQLite: .cogniv/cache/memory.db)
+   │                      │
+   │                      └─► Archivist (FS: .cogniv/archive/<cid>)
+   │
+   └─► Ethos/Audit hooks (JSONL logbook in .cogniv/)
 ```
 
-Each agent has its **own `.cogniv/` folder** with separate memory and local reasoning.
-Only moral contract evaluation and anonymized audit logs are shared, only when Ethos Validator rejects a prompt or response.
-
-This separation ensures agents can learn and reason independently while upholding common ethical boundaries.
----
-
-##  Core Modules
-
-| Component           | Description                                                          |
-| ------------------- | -------------------------------------------------------------------- |
-| **Moral Contracts** | WASM-style rules for ethical validation; decentralized and patchable |
-| **Ethos Validator** | Filters all inputs/outputs before memory or model execution          |
-| **SQLite Cache**    | Fast-access short-term memory (synthetic hippocampus)                |
-| **DAG Memory**      | Git-style Directed Acyclic Graph for symbolic long-term memory       |
-| **Auditor Log**     | Shared tamper-resistant record of rejected/approved ethical events   |
-
-Agents orchestrate the flow:
-
-* **Librarian** – Routes memory queries across cache and DAG
-* **Memory Agent** – Adds, prunes, and evolves DAG memory
-* **Ethos Agent** – Validates actions using shared moral contracts
-* **Audit Agent** – Anonymously logs decisions for shared ethical context
+* **Summaries**: created only for long inputs (current threshold: \~500 chars, via the `summary` crate).
+* **Reflection**: periodic “themes” line computed from *recent summaries* (keyword frequency; deterministic, offline).
+* **Init**: the first call creates `.cogniv/` and seeds config, contracts, and logbook (idempotent).
 
 ---
 
-## How It Works with GPT-OSS
+## Install (Python)
+
+Requirements: Python ≥ 3.8, Rust toolchain, `maturin`.
+
+```bash
+# build the Python extension in editable mode
+cd synaptik-workspace/synaptik-core-py
+pip install maturin
+maturin develop --release
+```
+
+### Quick test
 
 ```python
-from transformers import pipeline
-from synaptik_core import recall_memory, commit_memory, evaluate_ethics
+from synaptik_core import PyCommands
 
-# Load local GPT-OSS model
-model_id = "openai/gpt-oss-20b" 
-agent = pipeline("text-generation", model=model_id, torch_dtype="auto", device_map="auto")
+cmd = PyCommands()
+print("root:", cmd.root())
 
-# Step 1: Validate prompt
-if not evaluate_ethics("What should I do about my friend who lied?"):
-    raise Exception(" Rejected by Ethos Validator")
+# Short notes won't be summarized; use longer text to see reflection
+mid = cmd.remember("chat", "Hello from Synaptik Core.")
+print("memory_id:", mid)
 
-# Step 2: Recall memory
-context = recall_memory("user:trust issues")
+print("reflect:", cmd.reflect("chat", 20))
+print("stats:", cmd.stats(None))
+```
 
-# Step 3: Build prompt
-prompt = f"Context: {context}\n\nUser: What should I do about my friend who lied?\nAssistant:"
+> Tip: to see a non-empty `reflect`, ingest 3–4 longer notes (>500 chars) that share a few repeated terms, then call `reflect("chat", window)`.
 
-# Step 4: Generate
-response = agent(prompt, max_new_tokens=256)[0]["generated_text"]
+---
 
-# Step 5: Ethics check + commit
-if evaluate_ethics(response):
-    commit_memory(f"Trust repair advice: {response}")
-else:
-    print(" Response rejected by moral contract.")
+## Use with Groq or Ollama
+
+Let the LLM plan, but keep memory/ethics local. The model emits a tiny **action JSON**; your host calls `PyCommands`.
+
+```python
+from groq import Groq
+from synaptik_core import PyCommands
+import json, re, os
+
+os.environ.setdefault("GROQ_API_KEY", "<your-key>")
+client = Groq()
+cmd = PyCommands()
+
+SYSTEM = """You are the Synaptik Agent.
+- Synaptik Core handles persistence/reflection/stats. You are stateless.
+- Available actions (emit ONE JSON line when needed):
+  {"action":"remember","args":{"lobe":"chat","content":"...","key":null}}
+  {"action":"reflect","args":{"lobe":"chat","window":50}}
+  {"action":"stats","args":{"lobe":null}}
+- Otherwise answer in plain text.
+"""
+
+def maybe_parse_action(text):
+    t = text.strip()
+    if t.startswith("{") and t.endswith("}"):
+        return json.loads(t)
+    m = re.search(r"\{.*?\}", text, flags=re.DOTALL)
+    return json.loads(m.group(0)) if m else None
+
+def call(action):
+    a, x = action["action"], action.get("args", {})
+    if a == "remember":
+        return {"ok": True, "memory_id": cmd.remember(x.get("lobe","notes"), x.get("content",""), x.get("key"))}
+    if a == "reflect":
+        return {"ok": True, "reflection": cmd.reflect(x.get("lobe","notes"), int(x.get("window",20)))}
+    if a == "stats":
+        return {"ok": True, "stats": cmd.stats(x.get("lobe"))}
+    return {"ok": False, "error": f"unknown action {a}"}
+
+msgs = [{"role":"system","content":SYSTEM},
+        {"role":"user","content":"Please remember: I like concise Rust tips."}]
+out = client.chat.completions.create(model="openai/gpt-oss-20b", messages=msgs, temperature=0.2)
+txt = out.choices[0].message.content
+act = maybe_parse_action(txt)
+print(call(act) if act else txt)
 ```
 
 ---
 
-## 🛠️ Tech Stack
+## Design Principles
 
-| Tech               | Role                                                                                          |
-| ------------------ | --------------------------------------------------------------------------------------------- |
-| **Rust / PyO3**    | Core memory logic, DAG structure, and ethical validation                                      |
-| **Python**         | Agent orchestration and local LLM integration                                                 |
-| **SQLite**         | Fast short-term memory cache                                                                  |
-| **Custom DAG**     | Immutable, content-addressed symbolic memory graph                                            |
-| **WASM Contracts** | Secure, cryptographically patchable moral contract validation engine                          |
-| **OpenAI OSS**     | Local model inference (`gpt-oss-20b` / `gpt-oss-120b`) for reflection, generation, and dialog |
+* **AI Symbiosis**: agents that collaborate with humans/tools, not replace them.
+* **Local-first**: works offline; simple files + SQLite; easy to audit and ship.
+* **Deterministic reflection**: no hidden heuristics; tags from summaries only.
+* **Separation of concerns**: hot vs. cold storage; orchestration vs. storage; LLM vs. memory/ethics.
+* **Idempotent init**: safe to call often; one writer to the DB.
 
 ---
 
-## Use Cases
+## What’s in the box (today)
 
-* **LLM memory backends** for offline/local agents
-* **Privacy-respecting AI companions** with enforceable alignment
-* **Auditable cognition** in law, education, mental health
-* **Research sandbox** for memory + ethics in agentic AI
-* **Edge intelligence** for Raspberry Pi, Jetson, and WASM targets
+* `Memory` (SQLite) — hot cache for bytes + summaries + metadata
+* `Archivist` (FS) — content-addressed blobs by BLAKE3 CID
+* `Librarian` — ingest (ID gen, optional summarization, reflection seed)
+* `Commands` — `remember`, `reflect`, `stats`
+* `LobeStore` — simple versioned object store per lobe (for blobs)
+* `Audit/Logbook` — JSONL streams seeded at init
+* `Ethos` (precheck/decision gate) — rules seeded from TOML
 
 ---
 
-##  Project Status
+## Roadmap
 
-* ✔ DAG memory (symbolic nodes, pruning, recall)
-* ✔ SQLite cache layer (recency-based)
-* ✔ PyO3 bridge for Python access
-* ✔ Modular `.cogniv/` folder per agent
-* ✔ WASM contract evaluator for moral enforcement
-* 🔜 CLI agent and voice agent (**Basil**)
+* Configurable reflection (swap freq for TF-IDF/embeddings when desired)
+* Richer consent & redaction flows in Ethos
+* More agent adapters (tools/functions)
+* Benchmarks and stress tests for multi-agent scenarios
 
 ---
 
@@ -135,7 +155,7 @@ else:
 
 Licensed under **Apache License 2.0** — see [LICENSE](./LICENSE).
 
-> Free to use, fork, remix, and build upon. Preserve the author and ethical mission.
+> Free to use, fork, and build upon. Preserve the author and ethical mission.
 
 ---
 
