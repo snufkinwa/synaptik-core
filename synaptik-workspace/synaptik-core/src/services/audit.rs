@@ -13,6 +13,7 @@ use std::path::Path;
 
 use contracts::{load_contract_from_file, evaluate_input_against_rules};
 
+
 // ----------- Logbook paths -----------
 
 
@@ -30,6 +31,8 @@ const CONTRACTS_LOG: &str = ".cogniv/logbook/contracts.jsonl";
 /// Length used by [`redact_preview`] to keep inputs privacy-safe yet debuggable.
 const PREVIEW_LEN: usize = 160;
 
+
+/// TODO: Add lock and unlock contract to show security features. 
 // ----------- Public API -----------
 
 /// Lightweight metadata describing a contract evaluation request.

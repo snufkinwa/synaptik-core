@@ -3,7 +3,6 @@ use blake3;
 use std::{borrow::Cow, fs, path::{Path, PathBuf}};
 
 /// === Embedded canon contracts ===
-/// Add more as you create them (e.g., base_risk.toml, etc.).
 pub const NONVIOLENCE_TOML_NAME: &str = "nonviolence.toml";
 pub const NONVIOLENCE_TOML: &str = include_str!("../assets/nonviolence.toml");
 
