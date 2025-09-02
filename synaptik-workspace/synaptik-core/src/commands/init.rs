@@ -2,10 +2,12 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use once_cell::sync::OnceCell;              // <-- use once_cell only (no std::OnceLock)
+use once_cell::sync::OnceCell;              
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use contracts::assets::write_default_contracts;
 
 #[derive(Debug, Clone)]
 pub struct InitReport {
@@ -67,14 +69,11 @@ pub fn ensure_initialized() -> Result<InitReport> {
         &mut existed,
     )?;
 
-    // Base contract
-    ensure_file(
-        &root.join("contracts"),
-        "base_ethics.toml",
-        Some(BASE_ETHICS_TOML),
-        &mut created,
-        &mut existed,
-    )?;
+    // Contract dir
+    ensure_dir(&root, "contracts", &mut created, &mut existed)?;
+
+    // Seed default contracts from the contracts crate (idempotent)
+    let _ = write_default_contracts(root.join("contracts"));
 
     // Logbook schema (per-stream JSONL files)
     initialize_logbook_files(&root, &mut created, &mut existed)?;
@@ -240,43 +239,4 @@ log_memory_operations = true
 log_contract_evaluations = true
 retention_days = 365
 enable_real_time_monitoring = true
-"#;
-
-const BASE_ETHICS_TOML: &str = r#"# Base Ethical Contract v1.0
-[contract]
-name = "base_ethics"
-version = "1.0.0"
-description = "Foundational ethical guardrails"
-audit_level = "full"
-
-[rules]
-no_harm = true
-respect_privacy = true
-truthfulness_required = true
-user_consent_required = true
-transparency_required = true
-
-[memory]
-consent_required = true
-retention_limits = true
-deletion_rights = true
-
-[validation]
-before_memory_storage = true
-before_external_action = true
-on_sensitive_topics = true
-on_personal_information = true
-before_decision_making = true
-
-[audit]
-log_all_decisions = true
-require_justification = true
-enable_trace_back = true
-store_in_logbook = true
-
-[consequences]
-warn_user = true
-block_action = true
-escalate_to_human = true
-log_violation = true
 "#;

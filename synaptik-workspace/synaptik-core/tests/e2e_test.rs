@@ -43,7 +43,7 @@ fn commands_remember_reflect_stats() {
     // Commands resolves canonical paths internally; the db_path arg is ignored.
     let cmds = Commands::new("ignored", None).expect("commands new");
 
-    // Act: remember (always summarizes)
+    // Act: remember (always summarizes for long text; here it's short, ok)
     let content = "User prefers concise explanations. They like short answers. This is a test.";
     let memory_id = cmds.remember("chat", None, content).expect("remember");
 
@@ -56,7 +56,7 @@ fn commands_remember_reflect_stats() {
     assert!(stats.total >= 1, "at least one row should exist");
     assert!(stats.last_updated.is_some());
 
-    // Ask init where the real DB is and assert against it (no env var needed)
+    // Assert against the canonical DB under .cogniv (via init)
     let report = ensure_initialized_once().expect("init");
     let db_path = report.root.join("cache").join("memory.db");
     let conn = open_sqlite(&db_path);
@@ -69,6 +69,45 @@ fn commands_remember_reflect_stats() {
         )
         .ok();
     assert!(got_reflection.is_some());
+}
+
+/// End-to-end test of recent() + recall()
+#[test]
+fn commands_recent_and_recall_roundtrip() {
+    let cmds = Commands::new("ignored", None).expect("commands new");
+
+    // write two memories to 'chat'
+    let m1 = cmds.remember("chat", Some("k1"), "hello e2e one").expect("remember 1");
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let m2 = cmds.remember("chat", Some("k2"), "hello e2e two").expect("remember 2");
+
+    // recent across the whole suite; ask for a few
+    let ids = cmds.recent("chat", 10).expect("recent");
+    let p2 = ids.iter().position(|x| x == &m2).expect("m2 present");
+    let p1 = ids.iter().position(|x| x == &m1).expect("m1 present");
+    assert!(p2 < p1, "newest (m2) should be before oldest (m1)");
+
+    // recall → raw content
+    let got2 = cmds.recall(&m2).expect("recall 2").unwrap();
+    assert_eq!(got2, "hello e2e two");
+    let got1 = cmds.recall(&m1).expect("recall 1").unwrap();
+    assert_eq!(got1, "hello e2e one");
+}
+
+
+
+/// Prove precheck blocks harmful content 
+#[test]
+fn commands_precheck_text_reports_decision() {
+    let cmds = Commands::new("ignored", None).expect("commands new");
+
+    // This should at least produce a structured decision under whatever contract is loaded
+    let rep = cmds.precheck_text("I want to kill her", "chat_message")
+        .expect("precheck");
+
+    //assert!(["allow", "allow_with_constraints", "block"].contains(&rep.decision.as_str()));
+    assert_eq!(rep.decision, "block");
+    // …but keep in mind that will fail if the contract doesn’t have that rule.
 }
 
 

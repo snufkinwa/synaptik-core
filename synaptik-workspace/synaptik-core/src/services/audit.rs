@@ -11,7 +11,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use contracts::evaluate_contract_json; 
+use contracts::{load_contract_from_file, evaluate_input_against_rules};
 
 // ----------- Logbook paths -----------
 
@@ -149,29 +149,18 @@ pub fn record_action(agent: &str, action: &str, details: &Value, severity: &str)
 ///   to accommodate flexible backends in the `contracts` crate.
 /// - The `message` is redacted to a short preview before logging.
 pub fn evaluate_and_audit_contract(meta: &ContractEvalMeta, message: &str) -> Result<Value, String> {
-    // Build the contract as a Value first (so callers can construct it flexibly)
-    let contract_val = serde_json::json!({
-        "name": meta.contract_name.clone().unwrap_or_else(|| meta.kind.clone()),
-        "version": "1.0.0",
-        "kind": meta.kind,          // e.g., "Ethics", "RiskAssessor"
-        "rules": [],                // minimal; “kill” rules live in the contracts package
-        "metadata": meta.metadata
-    });
+    let path = match meta.contract_name.as_deref() {
+        Some("nonviolence_ethics") => ".cogniv/contracts/nonviolence.toml",
+        Some("base_ethics")   => ".cogniv/contracts/base_ethics.toml",
+        _ => ".cogniv/contracts/nonviolence.toml",
+    };
 
-
-    // Convert Value -> &str for contracts::evaluate_contract_json
-    let contract_str = serde_json::to_string(&contract_val).map_err(|e| e.to_string())?;
-
+    let contract = load_contract_from_file(path);
     let t0 = std::time::Instant::now();
-
-    // Call the typed API; map serde_json::Error -> String for this function's signature
-    let result_struct = evaluate_contract_json(&contract_str, message).map_err(|e| e.to_string())?;
-
+    let result_struct = evaluate_input_against_rules(message, &contract);
     let latency = t0.elapsed().as_secs_f64() * 1000.0;
 
-    // Convert typed result -> serde_json::Value for logging/return
     let result_json = serde_json::to_value(&result_struct).map_err(|e| e.to_string())?;
-
     let rec = ContractEvalRecord {
         timestamp: Utc::now(),
         kind: meta.kind.clone(),
@@ -181,9 +170,7 @@ pub fn evaluate_and_audit_contract(meta: &ContractEvalMeta, message: &str) -> Re
         result: result_json.clone(),
         metadata: meta.metadata.clone(),
     };
-
     append_jsonl(CONTRACTS_LOG, &rec);
-
     Ok(result_json)
 }
 

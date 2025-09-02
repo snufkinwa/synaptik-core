@@ -1,0 +1,92 @@
+name = "Base Ethics – Nonviolence"
+version = "1.0.1"
+description = "Block personal threats / violent language; allow benign idioms"
+
+# ----- Allowlist: benign idioms (these win over violations) -----
+[[rules]]
+action = "say"
+effect = "allow"
+matches_any = [
+  "kill time",
+  "killing it",
+  "killer app",
+  "killer feature",
+  "killer deal",
+  "kill switch",
+  "kill for a slice",
+  "kill for a pizza",
+]
+violation = "Benign idiom usage"
+severity = "none"
+constraints = []  # explicit no-op; useful for consistency
+
+# ----- Personal threats: explicit high-severity (with pronouns or broad groups) -----
+[[rules]]
+action = "say"
+contains_any = [
+  # pronoun / person-targeted
+  "kill him", "kill her", "kill them", "kill you", "kill me", "kill us",
+  "hurt him", "hurt her", "hurt them", "hurt you", "hurt me", "hurt us",
+  "attack him", "attack her", "attack them", "attack you", "attack me", "attack us",
+
+  # broad-group patterns
+  "kill everyone", "kill every", "kill all", "kill people",
+  "hurt everyone", "harm everyone", "attack everyone"
+]
+violation = "Personal threat or harm language detected"
+violation_code = "harm_threat_personal"
+action_suggestion = "Please avoid language that suggests harm to people."
+severity = "high"
+constraints = [
+  "refuse_personal_harm_content",
+  "avoid_violent_language",
+  "reframe_nonviolent",
+  "offer_deescalation",
+  "do_not_repeat_harmful_phrases"
+]
+
+# ----- Violent methods / weapons (also high severity) -----
+[[rules]]
+action = "say"
+contains_any = [
+  "stab", "stabbing", "shoot", "shooting", "punch",
+  "strangle", "poison", "bomb", "explosive", "behead"
+]
+violation = "Violent method suggested"
+violation_code = "violent_suggestion"
+action_suggestion = "I can’t help with violent methods."
+severity = "high"
+constraints = [
+  "refuse_instructions_for_violence",
+  "avoid_violent_language",
+  "reframe_nonviolent",
+  "offer_deescalation",
+  "do_not_repeat_harmful_phrases"
+]
+
+# ----- Generic harmful / destructive language (lower severity) -----
+[[rules]]
+action = "say"
+contains_any = ["kill", "hurt", "harm", "attack", "destroy", "annihilate", "demolish"]
+violation = "Harmful or destructive language"
+violation_code = "harm_language_generic"
+action_suggestion = "Let’s choose constructive wording."
+severity = "medium"
+constraints = [
+  "soften_language",
+  "avoid_violent_language",
+  "reframe_constructive"
+]
+
+# ----- Justification of violence (high) -----
+[[rules]]
+action = "say"
+contains_any = ["deserved it", "had it coming"]
+violation = "Justification of violence detected"
+violation_code = "justification_of_violence"
+severity = "high"
+constraints = [
+  "reframe_nonviolent",
+  "offer_deescalation",
+  "avoid_justification_language"
+]

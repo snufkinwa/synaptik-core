@@ -48,17 +48,17 @@ pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict
     let risk_val = evaluate_and_audit_contract(
         &ContractEvalMeta {
             kind: "RiskAssessor".into(),
-            contract_name: Some("base_risk".into()),
+            contract_name: Some("nonviolence".into()), // renamed
             metadata: json!({ "intent": intent_label }),
         },
         candidate_text,
     )?;
 
-    // 2) Ethics evaluation
+    // 2) Ethics evaluation (same contract for now)
     let ethics_val = evaluate_and_audit_contract(
         &ContractEvalMeta {
             kind: "Ethics".into(),
-            contract_name: Some("base_ethics".into()),
+            contract_name: Some("nonviolence".into()), // renamed
             metadata: json!({}),
         },
         candidate_text,
@@ -68,7 +68,7 @@ pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict
     let passed = ethics_val["passed"].as_bool().unwrap_or(true);
     let reason = ethics_val["reason"].as_str().unwrap_or("").to_string();
     let risk = risk_val["risk"].as_str().unwrap_or("Low").to_string();
-    let constraints = risk_val["constraints"]
+    let constraints = ethics_val["constraints"]
         .as_array()
         .unwrap_or(&vec![])
         .iter()

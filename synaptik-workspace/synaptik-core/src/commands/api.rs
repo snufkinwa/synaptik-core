@@ -16,6 +16,15 @@ pub struct Commands {
     librarian: Librarian, // no DB inside
 }
 
+#[derive(Debug, Serialize)]
+pub struct EthosReport {
+    pub decision: String,
+    pub reason: String,
+    pub risk: String,
+    pub action_suggestion: Option<String>,
+    pub violation_code: Option<String>,
+}
+
 impl Commands {
     // Keep the signature for now; ignore the args. Prefix with _ to silence warnings.
     pub fn new(_db_path: &str, _archivist: Option<Archivist>) -> Result<Self> {
@@ -40,26 +49,110 @@ impl Commands {
         Ok(Self { memory, librarian })
     }
 
+    /// Gate arbitrary text with Ethos (for normal chat).
+pub fn precheck_text(&self, text: &str, purpose: &str) -> Result<EthosReport> {
+    let v = precheck(text, purpose).map_err(|e| anyhow!("ethos precheck error: {e}"))?;
+    let decision = match decision_gate(&v) {
+        Decision::Allow => "allow",
+        Decision::AllowWithConstraints => "allow_with_constraints",
+        Decision::Block => "block",
+    }.to_string();
+    
+    let action_suggestion = None;
+    let violation_code = None;
+
+    record_action(
+        "commands",
+        "precheck_called",
+        &json!({"purpose": purpose, "decision": decision, "violation_code": violation_code}),
+        "low",
+    );
+
+    Ok(EthosReport {
+        decision,
+        reason: v.reason.clone(),
+        risk: v.risk.clone(),
+        action_suggestion,
+        violation_code,
+    })
+}
+
+
+    /// Newest → oldest memory_ids for a lobe.
+    pub fn recent(&self, lobe: &str, n: usize) -> Result<Vec<String>> {
+        recent_ids_in_lobe(&self.memory, lobe, n)
+    }
+
+    /// Recall full text (tries hot Memory, then cold via Librarian.fetch).
+    pub fn recall(&self, memory_id: &str) -> Result<Option<String>> {
+        if let Some(bytes) = self.memory.recall(memory_id)? {
+            return Ok(Some(String::from_utf8_lossy(&bytes).to_string()));
+        }
+        if let Some(bytes) = self.librarian.fetch(&self.memory, memory_id)? {
+            return Ok(Some(String::from_utf8_lossy(&bytes).to_string()));
+        }
+        Ok(None)
+    }
 
     pub fn remember(&self, lobe: &str, key: Option<&str>, content: &str) -> Result<String> {
-        record_action("commands", "remember_called", &json!({"lobe": lobe, "key_is_some": key.is_some()}), "low");
+        record_action(
+            "commands", "remember_called",
+            &json!({"lobe": lobe, "key_is_some": key.is_some()}),
+            "low"
+        );
 
-        let v = precheck(content, "memory_storage").map_err(|e| anyhow!("ethos precheck error: {e}"))?;
+        let v = precheck(content, "memory_storage")
+            .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
         match decision_gate(&v) {
             Decision::Block => {
-                record_action("commands", "remember_blocked", &json!({"reason": v.reason, "risk": v.risk}), "high");
+                record_action(
+                    "commands", "remember_blocked",
+                    &json!({"reason": v.reason, "risk": v.risk}), "high"
+                );
                 return Err(anyhow!("blocked by ethics: {}", v.reason));
             }
             Decision::AllowWithConstraints => {
-                record_action("commands", "remember_constraints", &json!({"constraints": v.constraints, "risk": v.risk}), "medium");
+                record_action(
+                    "commands", "remember_constraints",
+                    &json!({"constraints": v.constraints, "risk": v.risk}), "medium"
+                );
             }
             Decision::Allow => {}
         }
 
-        let id = self.librarian.ingest_text(&self.memory, lobe, key, content)?;
-        record_action("commands", "remember_stored", &json!({"id": id, "lobe": lobe}), "low");
+        // Normalize to match Librarian’s behavior when lobe is empty.
+        let lobe_eff = if lobe.is_empty() { "notes" } else { lobe };
+
+        // 1) write hot via Librarian
+        let id = self.librarian.ingest_text(&self.memory, lobe_eff, key, content)?;
+        record_action(
+            "commands", "remember_stored",
+            &json!({"id": id, "lobe": lobe_eff}), "low"
+        );
+
+        // 2) AUTO-PROMOTE RULE (count-based): if hot >= 5 → promote all hot in this lobe
+        //    Hot = total - archived (we reuse existing tiny helpers here).
+        let total    = count_rows(&self.memory, Some(lobe_eff))?;
+        let archived = count_archived(&self.memory, Some(lobe_eff))?;
+        let hot = total.saturating_sub(archived);
+
+        if hot >= 5 {
+            if let Ok(promoted) = self.memory.promote_all_hot_in_lobe(lobe_eff) {
+                record_action(
+                    "commands", "auto_promote_to_dag",
+                    &json!({
+                        "lobe": lobe_eff,
+                        "hot_before": hot,
+                        "promoted_count": promoted.len()
+                    }),
+                    "low"
+                );
+            }
+        }
+
         Ok(id)
     }
+
 
     pub fn reflect(&self, lobe: &str, window: usize) -> Result<String> {
         record_action("commands", "reflect_called", &json!({"lobe": lobe, "window": window}), "low");
@@ -146,6 +239,22 @@ fn latest_id_in_lobe(memory: &Memory, lobe: &str) -> Result<Option<String>> {
         return Ok(Some(id));
     }
     Ok(None)
+}
+
+fn recent_ids_in_lobe(memory: &Memory, lobe: &str, limit: usize) -> Result<Vec<String>> {
+    let mut stmt = memory.db.prepare(
+        "SELECT memory_id
+         FROM memories
+         WHERE lobe = ?1
+         ORDER BY updated_at DESC
+         LIMIT ?2"
+    )?;
+    let rows = stmt.query_map((lobe, limit as i64), |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }
 
 fn count_rows(memory: &Memory, lobe: Option<&str>) -> Result<u64> {

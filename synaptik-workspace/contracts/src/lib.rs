@@ -1,9 +1,11 @@
 // Public modules so synaptik-core can use them
 pub mod types;
 pub mod evaluator;
+pub mod assets;
 
-pub use evaluator::{evaluate_input_against_rules, EvaluationResult};
+pub use evaluator::{evaluate_input_against_rules, load_contract_from_file, EvaluationResult};
 pub use types::MoralContract;
+pub use assets::{default_contract_text, write_default_contracts};
 
 /// --- Pure Rust API for synaptik-core ---
 pub fn evaluate_contract_json(json_contract: &str, message: &str)
