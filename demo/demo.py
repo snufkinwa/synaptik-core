@@ -131,6 +131,12 @@ def run_repl() -> None:
                 context_summary = "Previous context from stored memories: " + "; ".join(startup_memories)
                 convo.append({"role": "user", "content": f"[{context_summary}]"})
                 try:
+                    # Ensure chat header appears before the first assistant message
+                    if not posted_chat_header:
+                        print("\n" + "-" * 60)
+                        print("💬 Chat")
+                        print("-" * 60)
+                        posted_chat_header = True
                     assistant = chat(convo)
                     act = maybe_parse_action(assistant)
                     reasoning_text = assistant
