@@ -5,7 +5,6 @@
   <img src="https://img.shields.io/badge/rust-1.8+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?logo=python" alt="Python">
   <img src="https://img.shields.io/badge/OpenAI-Hackathon-ff69b4?logo=openai" alt="Hackathon">
-  <img src="https://img.shields.io/badge/contributions-welcome-brightgreen" alt="Contributions">
 </p>
 
 
