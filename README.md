@@ -1,7 +1,7 @@
 <p align="center"><img src="./images/synaptik.png" /></p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/<user>/<repo>" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/snufkinwa/synaptik-core" alt="License"></a>
   <img src="https://img.shields.io/badge/rust-1.8+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?logo=python" alt="Python">
   <img src="https://img.shields.io/badge/OpenAI-Hackathon-ff69b4?logo=openai" alt="Hackathon">
