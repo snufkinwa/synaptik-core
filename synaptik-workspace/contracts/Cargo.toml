@@ -1,0 +1,23 @@
+[package]
+name = "contracts"
+version = "0.1.0"
+edition = "2021"
+description = "WASM-compatible moral contracts module for Synaptik Core"
+authors = ["janayharris@synaptik-core.dev"]
+include = ["src/**", "assets/**", "Cargo.toml"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+wasm = ["wasm-bindgen"]
+
+[dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+anyhow = "1.0"
+sha2 = "0.10"
+ed25519-dalek = "1"
+blake3 = "1"

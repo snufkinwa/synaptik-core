@@ -1,0 +1,20 @@
+[package]
+name = "synaptik-core-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "synaptik_core"          
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+synaptik-core = { path = "../synaptik-core" }
+pyo3 = { version = "0.22.4", features = ["extension-module", "abi3-py38"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"

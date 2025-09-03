@@ -1,0 +1,342 @@
+// src/services/memory.rs
+//! Minimal single-writer memory store with linear DAG promotion.
+//!
+//! - Owns a single SQLite connection (WAL) to avoid multi-writer contention.
+//! - Persists raw `content` plus optional `summary` and `reflection` text.
+//! - Tracks cold-storage pointers (`archived_cid` + `archived_at`) for Archivist.
+//! - Adds best-effort promotion helpers to write nodes into the DAG **linearly per lobe**.
+//! - Leaves reads DB-first for MVP (no DAG reads/pruning in this pass).
+
+use anyhow::{bail, Context, Result};
+use blake3;
+use chrono::Utc;
+use rusqlite:: Connection;
+use serde_json::json;
+use std::path::Path;
+
+use crate::memory::dag;
+
+/// Memory is the single authority for writing to SQLite.
+/// Expose `db` as `pub(crate)` if other services need read-only helpers internally.
+pub struct Memory {
+    pub(crate) db: Connection,
+}
+
+impl Memory {
+    /// Open/create the SQLite DB and ensure schema.
+    ///
+    /// Behavior:
+    /// - Creates the parent directory if missing.
+    /// - Opens SQLite and enables WAL (good for 1 writer + many readers).
+    /// - Creates `memories` table and `(lobe, key)` index if they don't exist.
+    pub fn open(db_path: &str) -> Result<Self> {
+        if let Some(parent) = Path::new(db_path).parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent dir for {}", db_path))?;
+        }
+
+        let db = Connection::open(db_path)
+            .with_context(|| format!("opening sqlite at {}", db_path))?;
+
+        // WAL reduces writer/reader blocking; safe for our single-writer design.
+        db.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+
+            CREATE TABLE IF NOT EXISTS memories (
+              memory_id     TEXT PRIMARY KEY,  -- stable id for the row
+              lobe          TEXT NOT NULL,     -- logical bucket (e.g., "chat", "vision")
+              key           TEXT NOT NULL,     -- caller-defined sub-key/path
+              content       BLOB NOT NULL,     -- raw payload (bytes of text or binary)
+              summary       TEXT,              -- 1–2 sentence summary (Librarian writes)
+              reflection    TEXT,              -- tiny theme note (Commands.reflect writes)
+              created_at    TEXT NOT NULL,     -- RFC3339 UTC
+              updated_at    TEXT NOT NULL,     -- RFC3339 UTC
+              archived_cid  TEXT,              -- content-addressed id from Archivist (blake3 hex)
+              archived_at   TEXT               -- when it was archived (RFC3339 UTC)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mem_lobe_key ON memories(lobe, key);
+            "#,
+        )?;
+
+        Ok(Self { db })
+    }
+
+    // -------------------------------------------------------------------------
+    // Hot-path writes
+    // -------------------------------------------------------------------------
+
+    /// Upsert raw content only (no summary/reflect).
+    ///
+    /// - On INSERT: sets both timestamps to `now`.
+    /// - On CONFLICT(memory_id): updates lobe/key/content and bumps `updated_at`.
+    pub fn remember(&self, memory_id: &str, lobe: &str, key: &str, content: &[u8]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.execute(
+            r#"
+            INSERT INTO memories(memory_id, lobe, key, content, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(memory_id) DO UPDATE SET
+              lobe       = excluded.lobe,
+              key        = excluded.key,
+              content    = excluded.content,
+              updated_at = excluded.updated_at
+            "#,
+            (memory_id, lobe, key, content, &now),
+        )?;
+        Ok(())
+    }
+
+    /// Upsert raw content + summary (and optionally reflection).
+    ///
+    /// Notes:
+    /// - `reflection` is **only overwritten** when a **non-empty** string is provided.
+    ///   We use `COALESCE(NULLIF(excluded.reflection, ''), memories.reflection)`
+    ///   to keep any existing reflection unless a new non-empty value is passed.
+    pub fn remember_with_summary(
+        &self,
+        memory_id: &str,
+        lobe: &str,
+        key: &str,
+        content: &[u8],
+        summary: &str,
+        reflection: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.execute(
+            r#"
+            INSERT INTO memories(memory_id, lobe, key, content, summary, reflection, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            ON CONFLICT(memory_id) DO UPDATE SET
+              lobe       = excluded.lobe,
+              key        = excluded.key,
+              content    = excluded.content,
+              summary    = excluded.summary,
+              reflection = COALESCE(NULLIF(excluded.reflection, ''), memories.reflection),
+              updated_at = excluded.updated_at
+            "#,
+            (
+                memory_id,
+                lobe,
+                key,
+                content,
+                summary,
+                reflection.unwrap_or(""), // empty string = "do not overwrite"
+                &now,
+            ),
+        )?;
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Reads / simple metadata
+    // -------------------------------------------------------------------------
+
+    /// Fetch raw `content` bytes by `memory_id`.
+    ///
+    /// Returns:
+    /// - `Ok(Some(Vec<u8>))` if found,
+    /// - `Ok(None)` if missing.
+    pub fn recall(&self, memory_id: &str) -> Result<Option<Vec<u8>>> {
+        let mut stmt = self.db.prepare("SELECT content FROM memories WHERE memory_id=?1")?;
+        let mut rows = stmt.query([memory_id])?;
+        if let Some(row) = rows.next()? {
+            let bytes: Vec<u8> = row.get(0)?;
+            return Ok(Some(bytes));
+        }
+        Ok(None)
+    }
+
+    /// Read the archived content id (CID) if this memory was promoted to cold storage.
+    pub fn get_archived_cid(&self, memory_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.db.prepare("SELECT archived_cid FROM memories WHERE memory_id=?1")?;
+        let mut rows = stmt.query([memory_id])?;
+        if let Some(row) = rows.next()? {
+            let cid: Option<String> = row.get(0)?;
+            return Ok(cid);
+        }
+        Ok(None)
+    }
+
+    /// Mark a row as archived (set `archived_cid` and `archived_at`).
+    ///
+    /// Caller supplies:
+    /// - `cid` (e.g., blake3 hex of content),
+    /// - `archived_at` as RFC3339 UTC.
+    pub fn mark_archived(&self, memory_id: &str, cid: &str, archived_at: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE memories SET archived_cid=?1, archived_at=?2 WHERE memory_id=?3",
+            (cid, archived_at, memory_id),
+        )?;
+        Ok(())
+    }
+
+    /// Set/replace the reflection text after the fact and bump `updated_at`.
+    pub fn set_reflection(&self, memory_id: &str, reflection: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE memories SET reflection=?1, updated_at=?2 WHERE memory_id=?3",
+            (reflection, Utc::now().to_rfc3339(), memory_id),
+        )?;
+        Ok(())
+    }
+
+    /// Return all `memory_id`s that match an exact `(lobe, key)`.
+    pub fn find_by_lobe_key(&self, lobe: &str, key: &str) -> Result<Vec<String>> {
+        let mut stmt =
+            self.db
+                .prepare("SELECT memory_id FROM memories WHERE lobe=?1 AND key=?2")?;
+        let iter = stmt.query_map((lobe, key), |row| row.get::<_, String>(0))?;
+        Ok(iter.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Fetch the most recent `summary` strings for a lobe (DESC by `updated_at`).
+    pub fn recent_summaries_by_lobe(&self, lobe: &str, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.db.prepare(
+            "SELECT summary FROM memories
+             WHERE lobe=?1 AND summary IS NOT NULL
+             ORDER BY updated_at DESC
+             LIMIT ?2",
+        )?;
+        let iter = stmt.query_map((lobe, limit as i64), |row| row.get::<_, String>(0))?;
+        Ok(iter.filter_map(|r| r.ok()).collect())
+    }
+
+    // -------------------------------------------------------------------------
+    // Promotion to DAG (linear per lobe) — MVP-safe, best-effort
+    // -------------------------------------------------------------------------
+
+    /// Internal: load a row we plan to promote.
+    /// Returns (lobe, key, content, summary_opt, created_at, updated_at).
+    fn load_row_for_promotion(
+        &self,
+        memory_id: &str,
+    ) -> Result<(String, String, Vec<u8>, Option<String>, String, String)> {
+        let mut stmt = self.db.prepare(
+            "SELECT lobe, key, content, summary, created_at, updated_at
+             FROM memories WHERE memory_id=?1",
+        )?;
+        let mut rows = stmt.query([memory_id])?;
+        if let Some(row) = rows.next()? {
+            let lobe: String = row.get(0)?;
+            let key: String = row.get(1)?;
+            let content: Vec<u8> = row.get(2)?;
+            let summary: Option<String> = row.get(3)?;
+            let created_at: String = row.get(4)?;
+            let updated_at: String = row.get(5)?;
+            Ok((lobe, key, content, summary, created_at, updated_at))
+        } else {
+            bail!("memory row not found: {memory_id}");
+        }
+    }
+
+    /// Internal: latest archived CID in this lobe (used for linear parent).
+    fn latest_archived_cid_in_lobe(&self, lobe: &str) -> Result<Option<String>> {
+        let mut stmt = self.db.prepare(
+            "SELECT archived_cid FROM memories
+             WHERE lobe=?1 AND archived_cid IS NOT NULL
+             ORDER BY archived_at DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([lobe])?;
+        if let Some(row) = rows.next()? {
+            let cid: Option<String> = row.get(0)?;
+            Ok(cid)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Promote a single memory row into the DAG, linking linearly within the lobe.
+    ///
+    /// MVP behavior:
+    /// - Computes CID as blake3(content) hex and stores it in `archived_cid`.
+    /// - Parent = latest previously archived CID in the same lobe (linear chain).
+    /// - Writes a JSON `meta` with lobe/key/summary_len/cid/created_at/updated_at.
+    /// - Calls dag::save_node(...). DAG write failures do **not** break the hot path.
+    pub fn promote_to_dag(&self, memory_id: &str) -> Result<()> {
+        let (lobe, key, content, summary_opt, created_at, updated_at) =
+            self.load_row_for_promotion(memory_id)?;
+
+        // CID = blake3(content)
+        let cid = blake3::hash(&content).to_hex().to_string();
+        let parent_cid = self.latest_archived_cid_in_lobe(&lobe)?;
+        let parents = parent_cid.into_iter().collect::<Vec<_>>();
+
+        // Small, stable metadata for the DAG
+        let meta = json!({
+            "cid": cid,
+            "lobe": lobe,
+            "key": key,
+            "summary_len": summary_opt.as_deref().map(str::len).unwrap_or(0),
+            "created_at": created_at,
+            "updated_at": updated_at,
+        });
+
+        // Best-effort DAG write — never break memory hot path
+        let _ = dag::save_node(
+            memory_id,
+            &String::from_utf8_lossy(&content),
+            &meta,
+            &parents,
+        );
+
+        // Mark row as archived
+        let now = Utc::now().to_rfc3339();
+        self.mark_archived(memory_id, &cid, &now)?;
+        Ok(())
+    }
+
+    /// Promote all non-archived rows in a lobe, oldest→newest, to keep the chain linear.
+    ///
+    /// Returns list of (memory_id, archived_cid).
+    pub fn promote_all_hot_in_lobe(&self, lobe: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.db.prepare(
+            "SELECT memory_id FROM memories
+             WHERE lobe=?1 AND archived_cid IS NULL
+             ORDER BY created_at ASC",
+        )?;
+        let ids = stmt
+            .query_map([lobe], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        drop(stmt);
+
+        let mut out = Vec::with_capacity(ids.len());
+        for id in &ids {
+            self.promote_to_dag(id)?;
+            if let Some(cid) = self.get_archived_cid(id)? {
+                out.push((id.clone(), cid));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Promote the most recent non-archived row in a lobe (if any).
+    /// Returns Some((memory_id, cid)) if one was promoted.
+    pub fn promote_latest_hot_in_lobe(&self, lobe: &str) -> Result<Option<(String, String)>> {
+        // Scope the read so the statement is dropped before we write.
+        let id_opt: Option<String> = {
+            let mut stmt = self.db.prepare(
+                "SELECT memory_id FROM memories
+                 WHERE lobe=?1 AND archived_cid IS NULL
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query([lobe])?;
+            if let Some(row) = rows.next()? {
+                Some(row.get(0)?)
+            } else {
+                None
+            }
+        };
+
+        if let Some(id) = id_opt {
+            self.promote_to_dag(&id)?;
+            if let Some(cid) = self.get_archived_cid(&id)? {
+                return Ok(Some((id, cid)));
+            }
+        }
+        Ok(None)
+    }
+}
