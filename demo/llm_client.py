@@ -57,7 +57,7 @@ def chat_with_regular_api(messages: List[Dict[str, str]], retries: int = 2, back
             resp = client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                temperature=0.3,
+                temperature=0.5,
                 max_tokens=1500,
             )
             return resp.choices[0].message.content or ""
