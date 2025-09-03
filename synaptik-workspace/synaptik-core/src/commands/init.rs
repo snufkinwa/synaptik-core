@@ -42,14 +42,16 @@ pub fn ensure_initialized() -> Result<InitReport> {
 
     // Directories
     ensure_dir(&root, "", &mut created, &mut existed)?;
-    ensure_dir(&root, "objects", &mut created, &mut existed)?;
-    ensure_dir(&root, "refs", &mut created, &mut existed)?;
     ensure_dir(&root, "contracts", &mut created, &mut existed)?;
+    // Ensure objects/ exists for LobeStore default path
+    ensure_dir(&root, "objects", &mut created, &mut existed)?;
     ensure_dir(&root, "cache", &mut created, &mut existed)?;
     ensure_dir(&root, "dag", &mut created, &mut existed)?;
     ensure_dir(&root, "archive", &mut created, &mut existed)?;
     ensure_dir(&root.join("archive"), "objects", &mut created, &mut existed)?;
     ensure_dir(&root, "logbook", &mut created, &mut existed)?;
+    // Optional: endpoints registry lives under services/
+    ensure_dir(&root, "services", &mut created, &mut existed)?;
 
     // HEAD ref (Git-like)
     ensure_file(
@@ -184,59 +186,34 @@ fn initialize_logbook_files(
 
 // ---------- defaults ----------
 
-const DEFAULT_CONFIG_TOML: &str = r#"[system]
+const DEFAULT_CONFIG_TOML: &str = r#"
+[system]
 name = "cogniv"
 version = "0.1.0"
-architecture = "hybrid_tiered"
 
 [memory]
-objects_path = ".cogniv/objects"
 cache_path = ".cogniv/cache/memory.db"
-dag_path = ".cogniv/dag"
+dag_path   = ".cogniv/dag"
 
 [logbook]
-path = ".cogniv/logbook"
-aggregate = ".cogniv/logbook.jsonl"
-ethics_log = ".cogniv/logbook/ethics.jsonl"
-agent_actions = ".cogniv/logbook/actions.jsonl"
+path               = ".cogniv/logbook"
+aggregate          = ".cogniv/logbook.jsonl"
+ethics_log         = ".cogniv/logbook/ethics.jsonl"
+agent_actions      = ".cogniv/logbook/actions.jsonl"
 contract_violations = ".cogniv/logbook/violations.jsonl"
 
 [services]
-ethos_enabled = true
+ethos_enabled     = true
 librarian_enabled = true
-audit_enabled = true
-sqlite_cache_enabled = true
-dag_consensus_enabled = false
-
-[endpoints]
-registry = ".cogniv/services/registry.json"
+audit_enabled     = true
 
 [contracts]
-path = ".cogniv/contracts"
-default_contract = "base_ethics.toml"
-validation_required = true
-audit_all_decisions = true
+path            = ".cogniv/contracts"
+default_contract = "nonviolence.toml"
 
 [cache]
 max_hot_memory_mb = 50
-warm_memory_retention_hours = 24
-enable_embeddings = true
-
-[demo]
-single_workspace = true
-ttl_hours = 24
-rate_limit_per_min = 30
-
-[librarian.prune]
-enable = true
-keep_newest = 500
-on_commit = true
-hot_budget_mb = 100
 
 [audit]
-log_all_agent_actions = true
-log_memory_operations = true
-log_contract_evaluations = true
 retention_days = 365
-enable_real_time_monitoring = true
 "#;

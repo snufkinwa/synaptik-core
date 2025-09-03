@@ -126,7 +126,7 @@ pub fn promote_to_archive(&self, memory: &Memory, memory_id: &str) -> Result<Opt
     }
 }
 
-// Fetch with cold path: read file via Archivist; re-cache via Memory.
+// Fetch with hot->cold path (kept for general callers).
 pub fn fetch(&self, memory: &Memory, memory_id: &str) -> Result<Option<Vec<u8>>> {
     if let Some(bytes) = memory.recall(memory_id)? {
         crate::services::audit::record_action(
@@ -134,18 +134,34 @@ pub fn fetch(&self, memory: &Memory, memory_id: &str) -> Result<Option<Vec<u8>>>
             &serde_json::json!({ "id": memory_id }), "low");
         return Ok(Some(bytes));
     }
+    self.fetch_cold(memory, memory_id)
+}
+
+/// Fetch only from cold storage via Archivist if a CID exists; re-caches on success.
+pub fn fetch_cold(&self, memory: &Memory, memory_id: &str) -> Result<Option<Vec<u8>>> {
     if let Some(cid) = memory.get_archived_cid(memory_id)? {
         if let Some(arch) = &self.archivist {
-            // was: let bytes = arch.get(&cid)?;
-            let bytes = arch.retrieve(&cid)?;
-            memory.remember(memory_id, "restored", "restored", &bytes)?;
-            crate::services::audit::record_action(
-                "librarian",
-                "memory_restored_from_archive",
-                &serde_json::json!({ "id": memory_id, "cid": cid }),
-                "low",
-            );
-            return Ok(Some(bytes));
+            match arch.retrieve(&cid) {
+                Ok(bytes) => {
+                    memory.remember(memory_id, "restored", "restored", &bytes)?;
+                    crate::services::audit::record_action(
+                        "librarian",
+                        "memory_restored_from_archive",
+                        &serde_json::json!({ "id": memory_id, "cid": cid }),
+                        "low",
+                    );
+                    return Ok(Some(bytes));
+                }
+                Err(_e) => {
+                    // Archive miss — gracefully degrade to None so callers may try DAG.
+                    crate::services::audit::record_action(
+                        "librarian",
+                        "archive_miss",
+                        &serde_json::json!({ "id": memory_id, "cid": cid }),
+                        "low",
+                    );
+                }
+            }
         }
     }
     Ok(None)

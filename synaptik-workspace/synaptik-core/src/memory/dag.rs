@@ -30,6 +30,12 @@ fn stream_refs_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
+fn ids_ref_dir() -> Result<PathBuf> {
+    let p = ensure_initialized_once()?.root.join("refs").join("ids");
+    fs::create_dir_all(&p)?;
+    Ok(p)
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -80,6 +86,28 @@ fn write_stream_ref(lobe: &str, key: &str, r: &StreamRef) -> Result<()> {
     let p = stream_refs_dir()?.join(format!("{}.json", stream_key(lobe, key)));
     write_atomic(&p, &serde_json::to_vec_pretty(r)?)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct IdIndex {
+    node: String,
+    lobe: String,
+    key: String,
+}
+
+fn write_id_index(id: &str, node: &str, lobe: &str, key: &str) -> Result<()> {
+    let p = ids_ref_dir()?.join(format!("{}.json", sanitize(id)));
+    let idx = IdIndex { node: node.to_string(), lobe: lobe.to_string(), key: key.to_string() };
+    write_atomic(&p, &serde_json::to_vec_pretty(&idx)?)
+}
+
+fn read_id_index(id: &str) -> Result<Option<IdIndex>> {
+    let p = ids_ref_dir()?.join(format!("{}.json", sanitize(id)));
+    if !p.exists() { return Ok(None); }
+    let bytes = fs::read(&p)?;
+    let idx: IdIndex = serde_json::from_slice(&bytes).unwrap_or_else(|_| IdIndex { node: String::new(), lobe: String::new(), key: String::new() });
+    if idx.node.is_empty() { return Ok(None); }
+    Ok(Some(idx))
 }
 
 // ---------- public API (used by Memory) ----------
@@ -145,6 +173,9 @@ pub fn save_node(
     sref.updated_at = Some(ts);
     write_stream_ref(lobe, key, &sref)?;
 
+    // Maintain a quick id -> node index to avoid directory scans.
+    let _ = write_id_index(id, &fname, lobe, key);
+
     Ok(fname)
 }
 
@@ -153,6 +184,25 @@ pub fn load_node(filename: &str) -> Result<Value> {
     let p = dag_nodes_dir()?.join(filename);
     let bytes = fs::read(&p).map_err(|_| anyhow!("node not found: {}", filename))?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Load a node by original memory id using the id index.
+pub fn load_node_by_id(id: &str) -> Result<Option<Value>> {
+    if let Some(idx) = read_id_index(id)? {
+        let v = load_node(&idx.node)?;
+        return Ok(Some(v));
+    }
+    Ok(None)
+}
+
+/// Return content string from a node by original memory id.
+pub fn content_by_id(id: &str) -> Result<Option<String>> {
+    if let Some(v) = load_node_by_id(id)? {
+        if let Some(s) = v.get("content").and_then(|x| x.as_str()) {
+            return Ok(Some(s.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Return the child (next) nodes of a given node *within the same stream* by scanning.

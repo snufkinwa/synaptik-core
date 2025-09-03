@@ -1,9 +1,8 @@
 <p align="center"><img src="./images/synaptik.png" /></p>
 
-# Synaptik Core
 
 **AI Symbiosis, not just automation.**
-A lightweight cognitive kernel for agents: local memory, simple reflection, and auditable guardrails — designed to work *with* people and tools.
+Synaptik Core is a lightweight Rust/Python kernel that gives any LLM agent durable memory and auditable ethics, all stored locally in .cogniv/.
 
 
 ## What is `synaptik-core`?
@@ -103,193 +102,32 @@ print("stats:", cmd.stats(None))
 
 > **Tip**: To see meaningful reflection, ingest 3–4 longer notes (>500 chars) that share repeated terms, then call `reflect("chat", window)`.
 
----
+## Chat Demo (Groq) — How to Interact
 
-## Complete Example with Groq Responses API
+We ship a runnable demo that wires Synaptik Core into a Groq-backed chat loop and shows memory + ethics in action.
 
-Here's a working demo that shows Synaptik Core in action with Groq's OpenAI models:
+Run the demo:
 
-```python
-# demo/MVP_groq_responses.py
-import os, json, re, time
-from pathlib import Path
-from dotenv import load_dotenv
-from openai import OpenAI
-from synaptik_core import PyCommands
-
-# Load environment variables
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-
-# Groq Responses API setup
-MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
-client = OpenAI(
-    api_key=os.environ.get("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1",
-)
-
-# Initialize Synaptik Core
-cmd = PyCommands()
-
-SYSTEM = """You are the Synaptik Agent.
-- Synaptik Core handles persistence/reflection/stats. You are stateless.
-- When you need an action, emit ONE JSON object line:
-  {"action":"remember","args":{"lobe":"chat","content":"...","key":null}}
-  {"action":"reflect","args":{"lobe":"chat","window":50}}
-  {"action":"stats","args":{"lobe":null}}
-- Otherwise, reply in plain text.
-"""
-
-def maybe_parse_action(text: str):
-    """Parse JSON action from LLM response."""
-    t = text.strip()
-    if t.startswith("{") and t.endswith("}"):
-        try:
-            return json.loads(t)
-        except Exception:
-            pass
-    m = re.search(r"\{.*?\}", text, flags=re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            return None
-    return None
-
-def tool_router(action):
-    """Execute Synaptik Core actions."""
-    name = (action or {}).get("action")
-    args = (action or {}).get("args", {}) or {}
-    
-    try:
-        if name == "remember":
-            return {"ok": True, "memory_id": cmd.remember(
-                args.get("lobe", "notes"),
-                args.get("content", ""),
-                args.get("key"),
-            )}
-        elif name == "reflect":
-            return {"ok": True, "reflection": cmd.reflect(
-                args.get("lobe", "notes"),
-                int(args.get("window", 20)),
-            )}
-        elif name == "stats":
-            return {"ok": True, "stats": cmd.stats(args.get("lobe"))}
-        else:
-            return {"ok": False, "error": f"unknown action: {name}"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-def chat(messages, retries=2):
-    """Call Groq Responses API with retry logic."""
-    # Convert messages to input string for Responses API
-    input_text = ""
-    for msg in messages:
-        if msg["role"] == "system":
-            input_text += f"{msg['content']}\n\n"
-        elif msg["role"] == "user":
-            input_text += f"User: {msg['content']}\n\n"
-        elif msg["role"] == "assistant":
-            input_text += f"Assistant: {msg['content']}\n\n"
-    
-    for attempt in range(retries + 1):
-        try:
-            response = client.responses.create(
-                model=MODEL,
-                input=input_text.strip(),
-                temperature=0.2,
-                max_output_tokens=512,
-                reasoning={"effort": "medium"}
-            )
-            return response.output_text or ""
-        except Exception as e:
-            if attempt < retries and "500" in str(e):
-                time.sleep(0.6 * (attempt + 1))
-                continue
-            # Fallback to regular chat API
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages,
-                    temperature=0.2,
-                    max_tokens=512,
-                )
-                return response.choices[0].message.content or ""
-            except Exception:
-                raise e
-
-def run_demo():
-    """Interactive demo of Synaptik Core + Groq."""
-    print("🧠 Synaptik Core + Groq Demo")
-    print(f"📁 Data directory: {cmd.root()}")
-    print(f"🤖 Model: {MODEL}")
-    print("\nType 'exit' to quit\n")
-
-    convo = [{"role": "system", "content": SYSTEM}]
-    
-    while True:
-        try:
-            user_input = input("You> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye! 👋")
-            break
-            
-        if user_input.lower() in {"exit", "quit", "q"}:
-            break
-        
-        if not user_input:
-            continue
-
-        convo.append({"role": "user", "content": user_input})
-        
-        try:
-            assistant_response = chat(convo)
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            convo.pop()
-            continue
-
-        # Check if response contains a tool action
-        action = maybe_parse_action(assistant_response)
-        if action:
-            # Execute the action
-            try:
-                result = tool_router(action)
-                print(f"🔧 Action: {action.get('action', 'unknown')}")
-                
-                if result.get("ok"):
-                    print("✅ Success")
-                    if "memory_id" in result:
-                        print(f"   Memory ID: {result['memory_id'][:20]}...")
-                    if "reflection" in result and result["reflection"]:
-                        print(f"   Reflection: {result['reflection']}")
-                    if "stats" in result:
-                        stats = result["stats"]
-                        print(f"   Total memories: {stats.get('total', 0)}")
-                        if stats.get('by_lobe'):
-                            top_lobes = stats['by_lobe'][:3]
-                            print(f"   Top lobes: {top_lobes}")
-                else:
-                    print(f"❌ Failed: {result.get('error', 'Unknown error')}")
-                
-                # Add tool result to conversation for context
-                convo.append({"role": "assistant", "content": assistant_response})
-                convo.append({"role": "user", "content": f"[Tool result: {json.dumps(result)}]"})
-                
-            except Exception as e:
-                print(f"❌ Tool error: {e}")
-                convo.append({"role": "assistant", "content": assistant_response})
-        else:
-            # Regular chat response
-            print(f"🤖 {assistant_response}")
-            convo.append({"role": "assistant", "content": assistant_response})
-
-        # Keep conversation manageable
-        if len(convo) > 20:
-            convo = [convo[0]] + convo[-18:]
-
-if __name__ == "__main__":
-    run_demo()
+```bash
+# Set env vars in .env: GROQ_API_KEY, GROQ_MODEL (optional)
+python -m demo.demo
 ```
+
+In the REPL:
+
+- Type normal messages and watch the assistant propose actions via a JSON object on the last line. The tool router executes: remember, reflect, stats, recent, recall.
+- Type demo (or :demo) to run a 3‑minute scripted flow that:
+  - Saves a preference and shows persistence across sessions
+  - Adds enough chat items to trigger auto‑promotion (hot → archive/DAG)
+  - Prints stats before/after (archived rises)
+  - Recalls a recent id with prefer="auto" and then force prefer="dag" to show DAG reads
+  - Runs an ethics precheck and tails the logbook
+
+Notes:
+
+- Unified recall API (Python): `cmd.recall(id, prefer)` returns a dict `{content, source}` where `source` is `hot|archive|dag`. `cmd.recall_many(ids, prefer)` returns a list of dicts.
+- Local precheck runs before the LLM. If the input is unsafe, the demo does NOT forward your raw text; instead it sends a safety prompt to the LLM using the constraints returned by the contract. This ensures Ethos/Audit logs are written and you still get a helpful, safe response.
+- Contracts are locked by default from the Rust side; Python bindings do not expose lock/unlock.
 
 ### Environment Setup
 
@@ -337,7 +175,7 @@ You> {"action":"stats","args":{}}
 ## Key Features Demonstrated
 
 ### **Intelligent Memory**
-- **Automatic summarization** for content >500 characters
+- **TF-IDF summarization** for content >500 characters
 - **Content-addressed storage** using BLAKE3 hashing
 - **Lobe organization** for different knowledge domains
 
@@ -374,7 +212,6 @@ You> {"action":"stats","args":{}}
 * `Archivist` (FS) — content-addressed blobs by BLAKE3 CID
 * `Librarian` — ingest (ID gen, optional summarization, reflection seed)
 * `Commands` — `remember`, `reflect`, `stats`
-* `LobeStore` — simple versioned object store per lobe (for blobs)
 * `Audit/Logbook` — JSONL streams seeded at init
 * `Ethos` (precheck/decision gate) — rules seeded from TOML
 
@@ -410,7 +247,7 @@ Licensed under **Apache License 2.0** — see [LICENSE](./LICENSE).
 
 **Janay Harris**
 AI Architect · Cloud Dev · Ethics Researcher
-[LinkedIn](https://www.linkedin.com/in/janay-codes/) · [janayharris@synaptik-core.dev](mailto:janayharris@synaptik-core.dev)
+[LinkedIn](https://www.linkedin.com/in/janay-codes/) · [janayharris@synaptik-core.dev](mailto:janlynnh.916@gmail.com)
 
 
 ## Citation
@@ -420,6 +257,4 @@ AI Architect · Cloud Dev · Ethics Researcher
 
 ## Vision
 
-> Intelligence without memory is reactive.
-> Intelligence without ethics is dangerous.
-> **Synaptik Core is the foundation for both.**
+> Synaptik Core is built on the belief that intelligence without memory is reactive, and intelligence without ethics is dangerous. It provides both.

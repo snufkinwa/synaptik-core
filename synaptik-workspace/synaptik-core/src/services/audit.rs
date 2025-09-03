@@ -10,12 +10,12 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use contracts::{load_contract_from_file, evaluate_input_against_rules};
-
-
+use contracts::assets::{read_verified_or_embedded, write_default_contracts};
+use contracts::{evaluate_input_against_rules, MoralContract};
+use crate::commands::init::ensure_initialized_once;
 // ----------- Logbook paths -----------
-
 
 /// Root directory for audit logs.
 const LOG_DIR: &str = ".cogniv/logbook";
@@ -31,8 +31,46 @@ const CONTRACTS_LOG: &str = ".cogniv/logbook/contracts.jsonl";
 /// Length used by [`redact_preview`] to keep inputs privacy-safe yet debuggable.
 const PREVIEW_LEN: usize = 160;
 
+static CONTRACTS_LOCKED: AtomicBool = AtomicBool::new(true);
 
-/// TODO: Add lock and unlock contract to show security features. 
+/// Lock contract files to their embedded versions.
+pub fn lock_contracts() {
+    CONTRACTS_LOCKED.store(true, Ordering::SeqCst);
+}
+
+/// Allow local edits to contract files.
+pub fn unlock_contracts() {
+    CONTRACTS_LOCKED.store(false, Ordering::SeqCst);
+}
+
+/// When contracts are locked, periodically or opportunistically restore the on-disk
+/// contract files to the embedded canonical versions. This helps ensure that any
+/// accidental edits on disk are reverted and keeps the filesystem consistent.
+fn enforce_contracts_on_disk_if_locked() {
+    if !CONTRACTS_LOCKED.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Ok(report) = ensure_initialized_once() {
+        let dir = report.root.join("contracts");
+        // Best effort: restore the known canonical contract files unconditionally.
+        let known = ["nonviolence.toml", "base_ethics.toml"];
+        for name in known {
+            let path = dir.join(name);
+            if let Ok(text) = read_verified_or_embedded(&path, name, true) {
+                let _ = std::fs::write(&path, text.as_ref());
+            }
+        }
+        // Also seed any missing files via the helper (idempotent)
+        let _ = write_default_contracts(&dir);
+        record_action(
+            "audit",
+            "contracts_restored",
+            &json!({ "dir": dir.to_string_lossy() }),
+            "low",
+        );
+    }
+}
+
 // ----------- Public API -----------
 
 /// Lightweight metadata describing a contract evaluation request.
@@ -43,7 +81,7 @@ const PREVIEW_LEN: usize = 160;
 /// - `metadata` — Arbitrary JSON passed along to the contract engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractEvalMeta {
-    pub kind: String,                 
+    pub kind: String,
     #[serde(default)]
     pub contract_name: Option<String>,
     #[serde(default)]
@@ -66,7 +104,7 @@ pub struct ContractEvalRecord {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract_name: Option<String>,
-    pub input_preview: String,        
+    pub input_preview: String,
     pub latency_ms: f64,
     pub result: Value,
     #[serde(default)]
@@ -86,15 +124,14 @@ pub struct ContractEvalRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EthicsDecision {
     pub timestamp: DateTime<Utc>,
-    pub intent_category: String,      
+    pub intent_category: String,
     pub passed: bool,
-    pub risk: String,                 
+    pub risk: String,
     pub constraints: Vec<String>,
     pub reason: String,
     #[serde(default)]
     pub requires_escalation: bool,
 }
-
 
 /// Initialize the audit agent (idempotent).
 ///
@@ -151,14 +188,24 @@ pub fn record_action(agent: &str, action: &str, details: &Value, severity: &str)
 /// - This function builds a minimal envelope `{ kind, rules: [], metadata }`
 ///   to accommodate flexible backends in the `contracts` crate.
 /// - The `message` is redacted to a short preview before logging.
-pub fn evaluate_and_audit_contract(meta: &ContractEvalMeta, message: &str) -> Result<Value, String> {
+pub fn evaluate_and_audit_contract(
+    meta: &ContractEvalMeta,
+    message: &str,
+) -> Result<Value, String> {
+    // Opportunistically restore canonical contracts when locked.
+    enforce_contracts_on_disk_if_locked();
     let path = match meta.contract_name.as_deref() {
         Some("nonviolence_ethics") => ".cogniv/contracts/nonviolence.toml",
-        Some("base_ethics")   => ".cogniv/contracts/base_ethics.toml",
         _ => ".cogniv/contracts/nonviolence.toml",
     };
-
-    let contract = load_contract_from_file(path);
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let locked = CONTRACTS_LOCKED.load(Ordering::SeqCst);
+    let text =
+        read_verified_or_embedded(Path::new(path), file_name, locked).map_err(|e| e.to_string())?;
+    let contract: MoralContract = toml::from_str(text.as_ref()).map_err(|e| e.to_string())?;
     let t0 = std::time::Instant::now();
     let result_struct = evaluate_input_against_rules(message, &contract);
     let latency = t0.elapsed().as_secs_f64() * 1000.0;
@@ -248,7 +295,11 @@ fn append_jsonl<P: AsRef<std::path::Path>, S: Serialize>(path: P, val: &S) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{}", serde_json::to_string(val).unwrap());
     }
 }

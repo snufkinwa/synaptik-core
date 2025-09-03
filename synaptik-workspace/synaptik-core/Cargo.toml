@@ -18,5 +18,4 @@ blake3      = "1.5.0"
 chrono      = { version = "0.4", features = ["serde"] }
 contracts   = { path = "../contracts" }
 once_cell             = "1.19"
-reqwest = { version = "0.11", features = ["json", "multipart"] }
 summary = "0.1.0"

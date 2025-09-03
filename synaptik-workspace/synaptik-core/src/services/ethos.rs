@@ -64,10 +64,47 @@ pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict
         candidate_text,
     )?;
 
-    // 3) Normalize + log decision
+    // 3) Normalize + derive effective risk
     let passed = ethics_val["passed"].as_bool().unwrap_or(true);
     let reason = ethics_val["reason"].as_str().unwrap_or("").to_string();
-    let risk = risk_val["risk"].as_str().unwrap_or("Low").to_string();
+
+    // Derive risk from either an explicit risk field, or from the highest rule severity.
+    fn sev_rank(s: &str) -> i32 {
+        match s.to_ascii_lowercase().as_str() {
+            "critical" => 4,
+            "high" => 3,
+            "medium" => 2,
+            "low" => 1,
+            _ => 0,
+        }
+    }
+    fn rank_to_label(r: i32) -> &'static str {
+        match r {
+            4 => "Critical",
+            3 => "High",
+            2 => "Medium",
+            1 => "Low",
+            _ => "Low",
+        }
+    }
+
+    // Pull any explicit risk if present
+    let mut effective_rank = 0;
+    if let Some(rsk) = risk_val.get("risk").and_then(|v| v.as_str()) {
+        effective_rank = sev_rank(rsk);
+    }
+    // Merge in highest violated rule severity from ethics result
+    if let Some(arr) = ethics_val.get("violated_rules").and_then(|v| v.as_array()) {
+        for v in arr {
+            if let Some(sev) = v.get("severity").and_then(|s| s.as_str()) {
+                let r = sev_rank(sev);
+                if r > effective_rank { effective_rank = r; }
+            }
+        }
+    }
+    // If we blocked but still somehow have Low, bump to at least High to reflect violation gravity
+    if !passed && effective_rank == 0 { effective_rank = 3; }
+    let risk = rank_to_label(effective_rank).to_string();
     let constraints = ethics_val["constraints"]
         .as_array()
         .unwrap_or(&vec![])

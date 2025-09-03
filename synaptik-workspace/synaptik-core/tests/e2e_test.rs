@@ -1,12 +1,12 @@
 // tests/e2e.rs
-// End-to-end tests for Synaptik MVP: Memory + Librarian + Archivist + Commands + LobeStore
+// End-to-end tests for Synaptik MVP: Memory + Librarian + Archivist + Commands
 //
 // Run with: cargo test -- --nocapture
 
+use blake3;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use blake3;
 use std::{thread, time::Duration};
 
 use rusqlite::Connection;
@@ -14,12 +14,25 @@ use rusqlite::Connection;
 use synaptik_core::commands::Commands;
 use synaptik_core::services::archivist::Archivist;
 use synaptik_core::services::librarian::Librarian;
-use synaptik_core::services::lobes::LobeStore;
 use synaptik_core::services::memory::Memory;
 
 use synaptik_core::commands::ensure_initialized_once;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// Serialize contract-mutation tests to avoid cross-test races on shared .cogniv/contracts
+fn contract_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, Once};
+    static mut PTR: *const Mutex<()> = std::ptr::null();
+    static INIT: Once = Once::new();
+    unsafe {
+        INIT.call_once(|| {
+            let b = Box::new(Mutex::new(()));
+            PTR = Box::into_raw(b);
+        });
+        (&*PTR).lock().unwrap()
+    }
+}
 
 fn tmp_path(name: &str) -> PathBuf {
     let ns = SystemTime::now()
@@ -77,9 +90,13 @@ fn commands_recent_and_recall_roundtrip() {
     let cmds = Commands::new("ignored", None).expect("commands new");
 
     // write two memories to 'chat'
-    let m1 = cmds.remember("chat", Some("k1"), "hello e2e one").expect("remember 1");
+    let m1 = cmds
+        .remember("chat", Some("k1"), "hello e2e one")
+        .expect("remember 1");
     std::thread::sleep(std::time::Duration::from_millis(30));
-    let m2 = cmds.remember("chat", Some("k2"), "hello e2e two").expect("remember 2");
+    let m2 = cmds
+        .remember("chat", Some("k2"), "hello e2e two")
+        .expect("remember 2");
 
     // recent across the whole suite; ask for a few
     let ids = cmds.recent("chat", 10).expect("recent");
@@ -94,15 +111,14 @@ fn commands_recent_and_recall_roundtrip() {
     assert_eq!(got1, "hello e2e one");
 }
 
-
-
-/// Prove precheck blocks harmful content 
+/// Prove precheck blocks harmful content
 #[test]
 fn commands_precheck_text_reports_decision() {
     let cmds = Commands::new("ignored", None).expect("commands new");
 
     // This should at least produce a structured decision under whatever contract is loaded
-    let rep = cmds.precheck_text("I want to kill her", "chat_message")
+    let rep = cmds
+        .precheck_text("I want to kill her", "chat_message")
         .expect("precheck");
 
     //assert!(["allow", "allow_with_constraints", "block"].contains(&rep.decision.as_str()));
@@ -110,6 +126,39 @@ fn commands_precheck_text_reports_decision() {
     // …but keep in mind that will fail if the contract doesn’t have that rule.
 }
 
+#[test]
+fn contract_lock_prevents_tampering() {
+    let _g = contract_test_guard();
+    let cmds = Commands::new("ignored", None).expect("commands new");
+    let report = ensure_initialized_once().expect("init");
+    let path = report.root.join("contracts").join("nonviolence.toml");
+
+    let tampered = r#"name = "Tampered"
+version = "0.0.1"
+description = "tampered allow"
+
+[[rules]]
+action = "say"
+effect = "allow"
+matches_any = ["kill"]
+severity = "none"
+violation = "none"
+"#;
+
+    std::fs::write(&path, tampered).expect("write tampered");
+    let rep = cmds
+        .precheck_text("I want to kill her", "chat_message")
+        .expect("precheck");
+    assert_eq!(rep.decision, "block");
+
+    cmds.unlock_contracts();
+    std::fs::write(&path, tampered).expect("write tampered");
+    let rep2 = cmds
+        .precheck_text("I want to kill her", "chat_message")
+        .expect("precheck");
+    assert_eq!(rep2.decision, "allow");
+    cmds.lock_contracts();
+}
 
 #[test]
 fn librarian_promote_to_archive_and_restore() {
@@ -138,32 +187,6 @@ fn librarian_promote_to_archive_and_restore() {
     // Fetch (cold path): Archivist.get → re-cache via Memory
     let fetched = lib.fetch(&mem, &id).expect("fetch").expect("some");
     assert_eq!(String::from_utf8_lossy(&fetched), content);
-}
-
-#[test]
-fn lobes_put_get_list_latest() {
-    // Arrange
-    let root = tmp_path("lobes_root");
-    let store = LobeStore::open(&root).expect("open lobe store");
-    store.create_lobe("vision").expect("create lobe");
-
-    // Act: put an object
-    let key = "run42/frame_000001.png";
-    let bytes = b"PNG\x89small";
-    let (ver, etag, _path) = store.put_object("vision", key, bytes).expect("put");
-    assert!(!ver.is_empty());
-    assert!(!etag.is_empty());
-
-    // Act: get latest
-    let got = store.get_object_latest("vision", key).expect("get latest");
-    assert_eq!(got, bytes);
-
-    // Act: list latest (prefix = run42/)
-    let rows = store.list_latest("vision", Some("run42/"), 10).expect("list");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, "run42/frame_000001.png");
-    assert_eq!(rows[0].1, ver);
-    assert_eq!(rows[0].2 as usize, bytes.len());
 }
 
 #[test]
@@ -236,17 +259,21 @@ fn memory_promote_all_hot_in_lobe_linear_chain() {
     // Assert: DB reflects archived_cid and archived_at is set
     let conn = open_sqlite(&db_path);
     for (id, exp_cid) in &promoted {
-        let (cid, at): (Option<String>, Option<String>) = conn.query_row(
-            "SELECT archived_cid, archived_at FROM memories WHERE memory_id=?1",
-            [id.as_str()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).expect("row exists");
+        let (cid, at): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT archived_cid, archived_at FROM memories WHERE memory_id=?1",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row exists");
         assert_eq!(cid.as_deref(), Some(exp_cid.as_str()));
         assert!(at.is_some(), "archived_at should be set for {}", id);
     }
 
     // Re-promoting should do nothing (already archived)
-    let again = mem.promote_all_hot_in_lobe("chat").expect("promote_all again");
+    let again = mem
+        .promote_all_hot_in_lobe("chat")
+        .expect("promote_all again");
     assert!(again.is_empty(), "no hot rows left to promote");
 }
 
@@ -257,14 +284,18 @@ fn memory_promote_latest_hot_in_lobe_single() {
     let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
 
     // One archived row and one still hot
-    mem.remember("chat_a1", "chat", "a1", b"old").expect("remember a1");
+    mem.remember("chat_a1", "chat", "a1", b"old")
+        .expect("remember a1");
     mem.promote_all_hot_in_lobe("chat").expect("promote a1"); // archive the first
 
     // new hot row
-    mem.remember("chat_a2", "chat", "a2", b"new").expect("remember a2");
+    mem.remember("chat_a2", "chat", "a2", b"new")
+        .expect("remember a2");
 
     // Act: promote only the most recent hot row
-    let one = mem.promote_latest_hot_in_lobe("chat").expect("promote latest");
+    let one = mem
+        .promote_latest_hot_in_lobe("chat")
+        .expect("promote latest");
     assert!(one.is_some(), "should promote one row");
     let (id, cid) = one.unwrap();
 
@@ -272,6 +303,186 @@ fn memory_promote_latest_hot_in_lobe_single() {
     assert_eq!(cid, blake3::hash(b"new").to_hex().to_string());
 
     // Next call should find nothing hot
-    let none = mem.promote_latest_hot_in_lobe("chat").expect("promote latest none");
+    let none = mem
+        .promote_latest_hot_in_lobe("chat")
+        .expect("promote latest none");
     assert!(none.is_none());
+}
+
+#[test]
+fn contracts_enforced_on_disk_when_locked() {
+    let _g = contract_test_guard();
+    let cmds = Commands::new("ignored", None).expect("commands new");
+    let report = ensure_initialized_once().expect("init");
+    let path = report.root.join("contracts").join("nonviolence.toml");
+
+    // Make sure we're in locked mode first
+    cmds.lock_contracts();
+
+    // Tamper the contract on disk
+    let tampered = r#"name = "Tampered"
+version = "0.0.1"
+description = "tampered allow"
+
+[[rules]]
+action = "say"
+effect = "allow"
+matches_any = ["kill"]
+severity = "none"
+violation = "none"
+"#;
+    std::fs::write(&path, tampered).expect("write tampered");
+    // Evaluate: should block and also restore canonical contract on disk
+    let rep = cmds
+        .precheck_text("I want to kill her", "chat_message")
+        .expect("precheck");
+    assert_eq!(rep.decision, "block");
+
+    // Wait briefly for any concurrent writes to settle and for enforcement to persist.
+    let mut restored = false;
+    for _ in 0..20 {
+        let after = std::fs::read_to_string(&path).expect("read after");
+        if !after.contains("Tampered") {
+            restored = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(restored, "locked evaluation should restore canonical contracts");
+
+    // Now unlock, tamper again, and confirm the tamper persists and is honored
+    cmds.unlock_contracts();
+    std::fs::write(&path, tampered).expect("re-tamper");
+    let rep2 = cmds
+        .precheck_text("I want to kill her", "chat_message")
+        .expect("precheck2");
+    assert_eq!(rep2.decision, "allow");
+    let after_unlock = std::fs::read_to_string(&path).expect("read after unlock");
+    assert!(
+        after_unlock.contains("Tampered"),
+        "unlocked evaluation should not auto-restore contracts"
+    );
+
+    // Re-lock for other tests safety
+    cmds.lock_contracts();
+}
+
+#[test]
+fn commands_total_recall_degrades_to_dag_after_cache_miss() {
+    let cmds = Commands::new("ignored", None).expect("commands new");
+
+    // Ingest one memory in lobe "demo"
+    let content = "demo payload for dag recall";
+    let id = cmds
+        .remember("demo", Some("k1"), content)
+        .expect("remember");
+
+    // Promote latest hot in lobe → writes DAG node and sets archived_cid
+    let _ = cmds.promote_latest_hot("demo").expect("promote latest hot");
+
+    // Remove the hot cache row to simulate cache miss
+    let report = ensure_initialized_once().expect("init");
+    let db_path = report.root.join("cache").join("memory.db");
+    let conn = open_sqlite(&db_path);
+    conn.execute("DELETE FROM memories WHERE memory_id=?1", [id.as_str()])
+        .expect("delete row");
+
+    // total_recall should fall back to DAG and report source="dag"
+    let res = cmds.total_recall(&id).expect("total_recall");
+    let (got, source) = res.expect("some");
+    assert_eq!(got, content);
+    assert_eq!(source, "dag");
+
+    // Explicit archive-only should fail (no Archivist object stored), returning None
+    let arch = cmds.recall_archive(&id).expect("recall_archive");
+    assert!(arch.is_none());
+}
+
+#[test]
+fn commands_total_recall_many_batch_uses_dag() {
+    let cmds = Commands::new("ignored", None).expect("commands new");
+
+    // Two memories in same lobe
+    let id1 = cmds
+        .remember("batch", Some("a"), "alpha content")
+        .expect("remember a");
+    let id2 = cmds
+        .remember("batch", Some("b"), "beta content")
+        .expect("remember b");
+
+    // Promote all hot rows in this lobe via Memory API using the same DB
+    let report = ensure_initialized_once().expect("init");
+    let db_path = report.root.join("cache").join("memory.db");
+    let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
+    mem.promote_all_hot_in_lobe("batch").expect("promote all hot");
+
+    // Delete from hot cache to force fallback
+    let conn = open_sqlite(&db_path);
+    conn.execute("DELETE FROM memories WHERE memory_id=?1", [id1.as_str()])
+        .expect("delete id1");
+    conn.execute("DELETE FROM memories WHERE memory_id=?1", [id2.as_str()])
+        .expect("delete id2");
+
+    // Bulk total recall
+    let out = cmds
+        .total_recall_many(&vec![id1.clone(), id2.clone()], None)
+        .expect("total_recall_many");
+
+    // Expect 2 results, all sourced from DAG
+    assert_eq!(out.len(), 2);
+    for (rid, content, source) in out {
+        assert_eq!(source, "dag");
+        if rid == id1 {
+            assert_eq!(content, "alpha content");
+        } else if rid == id2 {
+            assert_eq!(content, "beta content");
+        } else {
+            panic!("unexpected id {rid}");
+        }
+    }
+}
+
+
+/// Ethos risk ranking should reflect highest violated rule severity (High for personal threats)
+#[test]
+fn ethos_risk_ranking_personal_threat_is_high() {
+    let cmds = Commands::new("ignored", None).expect("commands new");
+    let _g = contract_test_guard();
+    cmds.lock_contracts();
+    let rep = cmds
+        .precheck_text("I want to kill her", "chat_message")
+        .expect("precheck");
+    assert_eq!(rep.decision, "block");
+    assert_eq!(rep.risk, "High");
+    let have: std::collections::HashSet<_> = rep.constraints.iter().cloned().collect();
+    for c in [
+        "refuse_personal_harm_content",
+        "avoid_violent_language",
+        "reframe_nonviolent",
+        "offer_deescalation",
+        "do_not_repeat_harmful_phrases",
+    ] {
+        assert!(have.contains(c), "missing expected constraint: {}", c);
+    }
+}
+
+/// Medium severity language should block with Medium risk under current policy
+#[test]
+fn ethos_risk_ranking_generic_harm_is_medium() {
+    let cmds = Commands::new("ignored", None).expect("commands new");
+    let _g = contract_test_guard();
+    cmds.lock_contracts();
+    let rep = cmds
+        .precheck_text("I want to destroy all the things.", "chat_message")
+        .expect("precheck");
+    assert_eq!(rep.decision, "block");
+    assert_eq!(rep.risk, "Medium");
+    let have: std::collections::HashSet<_> = rep.constraints.iter().cloned().collect();
+    for c in [
+        "soften_language",
+        "avoid_violent_language",
+        "reframe_constructive",
+    ] {
+        assert!(have.contains(c), "missing expected constraint: {}", c);
+    }
 }

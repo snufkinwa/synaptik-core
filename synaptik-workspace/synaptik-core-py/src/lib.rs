@@ -2,8 +2,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::PyTypeInfo;
 
-use ::synaptik_core as core;
-use core::commands::{Commands, EthosReport};
+extern crate synaptik_core as syn_core;
+use syn_core::commands::{Commands, EthosReport};
 
 fn pyerr<E: std::fmt::Display>(e: E) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
@@ -18,7 +18,7 @@ struct PyCommands {
 impl PyCommands {
     #[new]
     fn new() -> PyResult<Self> {
-        core::commands::init::ensure_initialized_once().map_err(pyerr)?;
+        syn_core::commands::init::ensure_initialized_once().map_err(pyerr)?;
         let inner = Commands::new("ignored", None).map_err(pyerr)?;
         Ok(Self { inner })
     }
@@ -29,6 +29,7 @@ impl PyCommands {
         d.set_item("decision", rep.decision)?;
         d.set_item("reason", rep.reason)?;
         d.set_item("risk", rep.risk)?;
+        d.set_item("constraints", rep.constraints)?;
         d.set_item("action_suggestion", rep.action_suggestion)?;
         d.set_item("violation_code", rep.violation_code)?;
         Ok(d.into_any().into_py(py))
@@ -48,8 +49,43 @@ impl PyCommands {
         self.inner.recent(lobe, n).map_err(pyerr)
     }
 
-    fn recall(&self, memory_id: &str) -> PyResult<Option<String>> {
-        self.inner.recall(memory_id).map_err(pyerr)
+    /// Unified recall that returns a dict {content, source} or None.
+    /// prefer: "hot" | "archive" | "dag" | "auto" (default)
+    #[pyo3(signature = (memory_id, prefer=None))]
+    fn recall(&self, py: Python<'_>, memory_id: &str, prefer: Option<&str>) -> PyResult<Option<PyObject>> {
+        match self.inner.recall_with_source(memory_id, prefer).map_err(pyerr)? {
+            Some((content, source)) => {
+                let d = PyDict::new_bound(py);
+                d.set_item("content", content)?;
+                d.set_item("source", source)?;
+                Ok(Some(d.into_any().into_py(py)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Bulk recall. Returns a list of dicts: [{id, content, source}]
+    #[pyo3(signature = (memory_ids, prefer=None))]
+    fn recall_many(
+        &self,
+        py: Python<'_>,
+        memory_ids: Vec<String>,
+        prefer: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let results = self
+            .inner
+            .total_recall_many(&memory_ids, prefer)
+            .map_err(pyerr)?;
+
+        let out = PyList::empty_bound(py);
+        for (id, content, source) in results {
+            let d = PyDict::new_bound(py);
+            d.set_item("id", id)?;
+            d.set_item("content", content)?;
+            d.set_item("source", source)?;
+            out.append(d)?;
+        }
+        Ok(out.into_any().into_py(py))
     }
 
     /// Stats dict: { total, archived, by_lobe: [(lobe, count)], last_updated }
@@ -69,15 +105,17 @@ impl PyCommands {
         Ok(d.into_any().into_py(py))
     }
 
+   
     fn root(&self) -> PyResult<String> {
-        let rep = core::commands::init::ensure_initialized_once().map_err(pyerr)?;
+        let rep = syn_core::commands::init::ensure_initialized_once().map_err(pyerr)?;
         Ok(rep.root.to_string_lossy().to_string())
     }
+
 }
 
 #[pymodule]
 fn synaptik_core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    if let Err(e) = core::commands::init::ensure_initialized_once() {
+    if let Err(e) = syn_core::commands::init::ensure_initialized_once() {
         let cat = pyo3::exceptions::PyRuntimeWarning::type_object_bound(py);
         PyErr::warn_bound(py, &cat, &format!("Init warning: {e}"), 0)?;
     }

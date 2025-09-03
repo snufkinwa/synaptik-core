@@ -300,6 +300,7 @@ impl Memory {
             .query_map([lobe], |row| row.get::<_, String>(0))?
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
+        drop(stmt);
 
         let mut out = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -314,15 +315,23 @@ impl Memory {
     /// Promote the most recent non-archived row in a lobe (if any).
     /// Returns Some((memory_id, cid)) if one was promoted.
     pub fn promote_latest_hot_in_lobe(&self, lobe: &str) -> Result<Option<(String, String)>> {
-        let mut stmt = self.db.prepare(
-            "SELECT memory_id FROM memories
-             WHERE lobe=?1 AND archived_cid IS NULL
-             ORDER BY created_at DESC
-             LIMIT 1",
-        )?;
-        let mut rows = stmt.query([lobe])?;
-        if let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
+        // Scope the read so the statement is dropped before we write.
+        let id_opt: Option<String> = {
+            let mut stmt = self.db.prepare(
+                "SELECT memory_id FROM memories
+                 WHERE lobe=?1 AND archived_cid IS NULL
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query([lobe])?;
+            if let Some(row) = rows.next()? {
+                Some(row.get(0)?)
+            } else {
+                None
+            }
+        };
+
+        if let Some(id) = id_opt {
             self.promote_to_dag(&id)?;
             if let Some(cid) = self.get_archived_cid(&id)? {
                 return Ok(Some((id, cid)));
