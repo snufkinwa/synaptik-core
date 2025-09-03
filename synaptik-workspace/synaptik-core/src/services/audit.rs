@@ -53,7 +53,7 @@ fn enforce_contracts_on_disk_if_locked() {
     if let Ok(report) = ensure_initialized_once() {
         let dir = report.root.join("contracts");
         // Best effort: restore the known canonical contract files unconditionally.
-        let known = ["nonviolence.toml", "base_ethics.toml"];
+        let known = ["nonviolence.toml"];
         for name in known {
             let path = dir.join(name);
             if let Ok(text) = read_verified_or_embedded(&path, name, true) {
