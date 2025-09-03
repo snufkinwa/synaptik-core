@@ -21,6 +21,7 @@ matches_any = [
   "this debugging session is killing me",
   "this bug is killing me",
   "this task is killing me",
+  "this is killing my productivity",
   # Light idioms expressing strong desire
   "kill for a coffee",
   "kill for some coffee",
@@ -106,6 +107,10 @@ matches_any = [
   "destroy this bug",
   "kill the bug",
   "kill this bug",
+  "kill bug",
+  "kill bugs",
+  "help kill bugs",
+  "kill bugs automatically",
   "kill a process",
   "kill the process",
   "kill -9",

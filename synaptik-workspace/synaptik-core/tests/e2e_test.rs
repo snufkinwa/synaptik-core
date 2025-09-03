@@ -490,6 +490,35 @@ fn ethos_risk_ranking_generic_harm_is_medium() {
     }
 }
 
+/// Memory precheck should allow benign technical idioms (per updated contract)
+#[test]
+fn commands_remember_allows_tech_idioms() {
+    let _g = contract_test_guard();
+    let cmds = Commands::new("ignored", None).expect("commands new");
+    // Ensure embedded contract is active
+    cmds.lock_contracts();
+
+    // Phrase contains "kill bugs" but in a technical/benign sense (allowlisted)
+    let content = "User wants an IDE that can automatically help kill bugs (hyperbolic).";
+
+    // Precheck explicitly for memory_storage should not block
+    let rep = cmds
+        .precheck_text(content, "memory_storage")
+        .expect("precheck memory_storage");
+    assert!(
+        rep.decision == "allow" || rep.decision == "allow_with_constraints",
+        "unexpected decision: {} (risk={})",
+        rep.decision,
+        rep.risk
+    );
+
+    // And remember() should succeed (no ethics block)
+    let id = cmds
+        .remember("solutions", Some("ide_bug_killing"), content)
+        .expect("remember with tech idiom allowed");
+    assert!(!id.is_empty());
+}
+
 /// Auto-promotion should also write filesystem archive objects under .cogniv/archive/<cid>
 #[test]
 fn commands_auto_promotion_writes_archive_objects() {
