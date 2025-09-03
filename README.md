@@ -141,33 +141,45 @@ GROQ_MODEL=openai/gpt-oss-20b
 ### Example Session
 
 ```
-🧠 Synaptik Core + Groq Demo
-📁 Data directory: /path/to/your/project/.cogniv
+ Synaptik Agent x Groq Responses API — Persistent Memory & Ethics
 🤖 Model: openai/gpt-oss-20b
+💾 Root: .cogniv
 
-You> Remember this: Quantum computers use qubits instead of classical bits.
-🔧 Action: remember
-✅ Success
-   Memory ID: chat_1ce81e364cb98a4f...
+💡 This agent will:
+   • Remember important information from our conversations
+   • Build knowledge over time using Memory IDs
+   • Check ethics before storing sensitive content
+   • Reference previous conversations using Memory IDs
 
-You> {"action":"remember","args":{"lobe":"physics","content":"Quantum mechanics is a fundamental theory in physics that describes the physical properties of nature at atomic and subatomic scales. Unlike classical physics, quantum mechanics shows that energy, momentum, and angular momentum are quantized into discrete values called quanta. This leads to phenomena like wave-particle duality and quantum superposition.","key":"quantum_basics"}}
-🔧 Action: remember
-✅ Success
-   Memory ID: physics_d8554b66ecdf86e0...
+Type ':demo' anytime to run a quick end-to-end demo.
+============================================================
 
-You> {"action":"reflect","args":{"lobe":"physics","window":10}}
-🔧 Action: reflect
-✅ Success
-   Reflection: Recurring themes: quantum(3), mechanics(2), physics(2)
+🧪 Testing APIs...
+✓ Synaptik Core: 0 memories
 
-You> What did I just store in my physics lobe?
-🤖 You stored a comprehensive explanation of quantum mechanics in your physics lobe. The content covers how quantum mechanics differs from classical physics, describing key concepts like quantized energy levels, wave-particle duality, and quantum superposition. The system generated a reflection showing recurring themes: quantum(3), mechanics(2), physics(2), indicating the conceptual focus of your stored knowledge.
+🧠 Loading recent memories...
 
-You> {"action":"stats","args":{}}
-🔧 Action: stats
-✅ Success
-   Total memories: 2
-   Top lobes: [('chat', 1), ('physics', 1)]
+------------------------------------------------------------
+💬 Chat
+------------------------------------------------------------
+
+You> :demo
+
+🚀 Running scripted demo...
+   Root: .cogniv
+   💾 Saved preference id: preferences_8eeb19dc062a...
+   📊 Chat before: total=0, archived=0
+   📊 Chat after:  total=5, archived=5
+   🔎 Recall(auto) chat_110c24a6557e2... source=hot, content='demo chat note 5'
+   🧩 Recall(dag)  chat_110c24a6557e2... source=dag, content='demo chat note 5'
+   📁 preferences → User prefers short, friendly greetings
+   📁 solutions   → Final answer: 42 because constraints...
+   🛡️ Precheck: BLOCK (risk=High)
+   📜 Ethics log tail:
+      {"constraints":[],"intent_category":"metadata_access","passed":true,"reason":"No violations detected.","requires_escalation":false,"risk":"Low","timestamp":"2025-09-03T04:54:37.362257+00:00"}
+      {"constraints":[],"intent_category":"memory_storage","passed":true,"reason":"No violations detected.","requires_escalation":false,"risk":"Low","timestamp":"2025-09-03T04:54:37.363900+00:00"}
+      {"constraints":["reframe_nonviolent","offer_deescalation","do_not_repeat_harmful_phrases","soften_language","avoid_violent_language","refuse_personal_harm_content","reframe_constructive"],"intent_category":"chat_message","passed":false,"reason":"Violated 2 rule(s).","requires_escalation":true,"risk":"High","timestamp":"2025-09-03T04:54:37.365946+00:00"}
+✅ Demo complete. Continue chatting!
 ```
 
 ---
