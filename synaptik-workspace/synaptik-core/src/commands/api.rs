@@ -235,6 +235,12 @@ impl Commands {
                     }),
                     "low",
                 );
+
+                // Ensure cold archive objects are written alongside DAG promotion.
+                // This keeps README’s promise: files under .cogniv/archive/<cid>.
+                for (id, _cid) in &promoted {
+                    let _ = self.librarian.promote_to_archive(&self.memory, id);
+                }
             }
         }
 

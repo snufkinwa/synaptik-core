@@ -1,0 +1,6 @@
+# Demo dependencies (install inside a virtual environment — preferably with conda)
+# Note: synaptik_core (Rust/Python binding) is built locally; install it separately.
+
+python-dotenv>=1.0.0
+openai>=1.30.0
+

@@ -40,6 +40,23 @@ def run_demo_flow(mem: MemoryBridge) -> None:
     print(f"   📊 Chat before: total={before_total}, archived={before_arch}")
     print(f"   📊 Chat after:  total={chat_stats_after.get('total',0)}, archived={chat_stats_after.get('archived',0)}")
 
+    # Show filesystem archive objects written under .cogniv/archive
+    try:
+        arch_dir = os.path.join(root, 'archive')
+        if os.path.isdir(arch_dir):
+            objs = []
+            for name in os.listdir(arch_dir):
+                # CIDs are long hex strings; filter non-files or subdirs
+                p = os.path.join(arch_dir, name)
+                if os.path.isfile(p) and len(name) >= 16:
+                    objs.append(name)
+            print(f"   📦 Archive objects: {len(objs)} in .cogniv/archive/")
+            if objs:
+                sample = ", ".join(objs[:2])
+                print(f"      e.g.: {sample}")
+    except Exception:
+        pass
+
     # 3) Pick a recent chat memory and show its recall source (auto), then force DAG recall
     chat_ids = mem.recent("chat", 1)
     if chat_ids:

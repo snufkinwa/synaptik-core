@@ -400,7 +400,10 @@ fn commands_total_recall_degrades_to_dag_after_cache_miss() {
 
 #[test]
 fn commands_total_recall_many_batch_uses_dag() {
+    // Ensure contracts are in a stable, locked state to avoid cross-test races.
+    let _g = contract_test_guard();
     let cmds = Commands::new("ignored", None).expect("commands new");
+    cmds.lock_contracts();
 
     // Two memories in same lobe
     let id1 = cmds
@@ -484,5 +487,43 @@ fn ethos_risk_ranking_generic_harm_is_medium() {
         "reframe_constructive",
     ] {
         assert!(have.contains(c), "missing expected constraint: {}", c);
+    }
+}
+
+/// Auto-promotion should also write filesystem archive objects under .cogniv/archive/<cid>
+#[test]
+fn commands_auto_promotion_writes_archive_objects() {
+    let cmds = Commands::new("ignored", None).expect("commands new");
+
+    // Use a unique lobe to avoid interference across tests
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let lobe = format!("arch_e2e_{}", ns);
+
+    // Ingest 5 items to trigger auto-promotion path in Commands::remember
+    let mut contents: Vec<String> = Vec::new();
+    for i in 1..=5 {
+        let text = format!("archive test note {}", i);
+        contents.push(text.clone());
+        let _ = cmds
+            .remember(&lobe, Some(&format!("k{}", i)), &text)
+            .expect("remember");
+    }
+
+    // Resolve archive dir from init and assert the CIDs exist as files
+    let report = ensure_initialized_once().expect("init");
+    let arch_dir = report.root.join("archive");
+    assert!(arch_dir.exists(), ".cogniv/archive should exist");
+
+    for text in contents {
+        let cid = blake3::hash(text.as_bytes()).to_hex().to_string();
+        let p = arch_dir.join(&cid);
+        assert!(
+            p.exists(),
+            "expected archive object missing: {:?}",
+            p
+        );
     }
 }
