@@ -2,6 +2,23 @@ import os
 import re
 from typing import List, Dict
 
+# Optional rich-based Markdown rendering for terminal output
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    _console: Console | None = Console()
+except Exception:
+    _console = None
+
+def print_assistant(text: str) -> None:
+    """Render assistant output; prefer Markdown via rich if available."""
+    if _console is not None:
+        # Header line for clarity, then render markdown
+        _console.print("🤖")
+        _console.print(Markdown(text or ""))
+    else:
+        print(f"🤖 {text}")
+
 
 from prompts import system_prompt
 from llm_client import chat, MODEL
@@ -162,7 +179,7 @@ def run_repl() -> None:
                         if m:
                             reasoning_text = assistant[:m.start()].strip()
                     if reasoning_text:
-                        print(f"🤖 {reasoning_text}")
+                        print_assistant(reasoning_text)
                     if act:
                         result = route(act, mem)
                         action_name = act.get("action", "unknown")
@@ -238,7 +255,7 @@ def run_repl() -> None:
                 ]
                 try:
                     assistant = chat(safe_messages)
-                    print(f"🤖 {assistant}")
+                    print_assistant(assistant)
                     convo.append({"role": "assistant", "content": assistant})
                 except Exception as e:
                     print(f"⚠ LLM fallback error: {e}")
@@ -269,7 +286,7 @@ def run_repl() -> None:
                 reasoning_text = assistant[:m.start()].strip()
 
         if reasoning_text:
-            print(f"🤖 {reasoning_text}")
+            print_assistant(reasoning_text)
 
         if act:
             try:
@@ -332,7 +349,7 @@ def run_repl() -> None:
                                 t = t[:80] + "..."
                             previews.append(t)
                         summary = "I remember: " + "; ".join(previews)
-                        print(f"🤖 {summary}")
+                        print_assistant(summary)
                         convo.append({"role": "assistant", "content": summary})
                     convo.append({"role": "user", "content": "[Recent memories retrieved:\n"+"\n".join(details)+"]"})
             except Exception as e:

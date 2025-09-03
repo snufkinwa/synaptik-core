@@ -15,10 +15,25 @@ matches_any = [
   "kill switch",
   "kill for a slice",
   "kill for a pizza",
+  # Broader day-to-day idioms
+  "is killing me",                    
+  "this is killing me",
+  "this debugging session is killing me",
+  "this bug is killing me",
+  "this task is killing me",
+  # Light idioms expressing strong desire
+  "kill for a coffee",
+  "kill for some coffee",
+  "kill for a break",
+  "kill for a nap",
+  "kill for a better ide",
 ]
 violation = "Benign idiom usage"
 severity = "none"
-constraints = []  # explicit no-op; useful for consistency
+constraints = [
+  "clarify_nonliteral_intent",
+  "avoid_violent_metaphors_when_possible"
+]  # still allow; nudge wording if appropriate
 
 # ----- Personal threats: explicit high-severity (with pronouns or broad groups) -----
 [[rules]]
@@ -76,6 +91,31 @@ constraints = [
   "soften_language",
   "avoid_violent_language",
   "reframe_constructive"
+]
+
+# ----- Allowlist: technical language that uses common verbs benignly -----
+[[rules]]
+action = "say"
+effect = "allow"
+matches_any = [
+  # Engineering contexts
+  "destroy all the legacy code",
+  "destroy all legacy code",
+  "destroy legacy code",
+  "destroy the bug",
+  "destroy this bug",
+  "kill the bug",
+  "kill this bug",
+  "kill a process",
+  "kill the process",
+  "kill -9",
+  "send sigkill",
+]
+violation = "Technical/benign usage allowed"
+severity = "none"
+constraints = [
+  "prefer_precise_technical_terms",
+  "clarify_nonliteral_intent"
 ]
 
 # ----- Justification of violence (high) -----
