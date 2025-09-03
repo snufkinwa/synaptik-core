@@ -228,23 +228,11 @@ You> :demo
 * `Ethos` (precheck/decision gate) — rules seeded from TOML
 
 
-## Deployment Options
-
-### 🖥️ **Desktop Application** (Recommended)
-Package as a standalone executable that users can download and run locally:
-
-```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed demo/app.py
-```
-
-
 ## Roadmap
 
-* Configurable reflection (swap frequency analysis for TF-IDF/embeddings)
+* Configurable reflection 
 * Richer consent & redaction flows in Ethos
 * More agent adapters (tools/functions)
-* Desktop GUI application
 * Benchmarks and stress tests for multi-agent scenarios
 
 
