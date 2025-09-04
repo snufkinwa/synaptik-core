@@ -1,14 +1,11 @@
 import os
 import re
 from typing import List, Dict
+from rich.console import Console
+from rich.markdown import Markdown
 
-# Optional rich-based Markdown rendering for terminal output
-try:
-    from rich.console import Console
-    from rich.markdown import Markdown
-    _console: Console | None = Console()
-except Exception:
-    _console = None
+_console: Console | None = Console()
+
 
 def print_assistant(text: str) -> None:
     """Render assistant output; prefer Markdown via rich if available."""
