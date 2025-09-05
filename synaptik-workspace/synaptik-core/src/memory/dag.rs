@@ -128,6 +128,8 @@ pub fn save_node(
     let mut sref = read_stream_ref(lobe, key)?;
     if sref.last_hash.as_deref() == Some(&h) {
         if let Some(latest) = sref.latest_node.clone() {
+            // Even if we don't write a new node, ensure this id is indexed to the latest node
+            let _ = write_id_index(id, &latest, lobe, key);
             return Ok(latest); // idempotent: nothing to write
         }
         // else: no latest yet — fall through and write one
@@ -203,6 +205,17 @@ pub fn content_by_id(id: &str) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+/// Reindex a memory id to the latest node of a given (lobe, key) stream.
+/// Returns true if an index was written, false if no latest node exists yet.
+pub fn reindex_id_to_latest(id: &str, lobe: &str, key: &str) -> Result<bool> {
+    let sref = read_stream_ref(lobe, key)?;
+    if let Some(latest) = sref.latest_node {
+        let _ = write_id_index(id, &latest, lobe, key);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Return the child (next) nodes of a given node *within the same stream* by scanning.

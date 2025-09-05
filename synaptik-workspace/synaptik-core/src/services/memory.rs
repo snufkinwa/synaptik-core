@@ -67,6 +67,30 @@ impl Memory {
     // Hot-path writes
     // -------------------------------------------------------------------------
 
+    /// Find an exact duplicate row by lobe and content bytes. Returns the latest matching memory_id.
+    pub fn find_exact_duplicate_in_lobe(&self, lobe: &str, content: &[u8]) -> Result<Option<String>> {
+        let mut stmt = self.db.prepare(
+            "SELECT memory_id FROM memories WHERE lobe=?1 AND content=?2 ORDER BY updated_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query((lobe, content))?;
+        if let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            Ok(Some(id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Bump the `updated_at` timestamp for a row.
+    pub fn touch(&self, memory_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.execute(
+            "UPDATE memories SET updated_at=?1 WHERE memory_id=?2",
+            (&now, memory_id),
+        )?;
+        Ok(())
+    }
+
     /// Upsert raw content only (no summary/reflect).
     ///
     /// - On INSERT: sets both timestamps to `now`.
@@ -86,6 +110,21 @@ impl Memory {
             (memory_id, lobe, key, content, &now),
         )?;
         Ok(())
+    }
+
+    /// Public: fetch (lobe, key) for a given memory_id, if present.
+    pub fn lobe_key(&self, memory_id: &str) -> Result<Option<(String, String)>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT lobe, key FROM memories WHERE memory_id=?1")?;
+        let mut rows = stmt.query([memory_id])?;
+        if let Some(row) = rows.next()? {
+            let l: String = row.get(0)?;
+            let k: String = row.get(1)?;
+            Ok(Some((l, k)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Upsert raw content + summary (and optionally reflection).
@@ -338,5 +377,44 @@ impl Memory {
             }
         }
         Ok(None)
+    }
+
+    /// Remove exact-duplicate rows within a lobe, keeping the most recently updated copy of each unique content.
+    /// Returns the number of rows deleted.
+    pub fn prune_exact_duplicates_in_lobe(&self, lobe: &str) -> Result<usize> {
+        // Load candidate rows (id, updated_at desc, content) to keep newest per hash.
+        let mut stmt = self.db.prepare(
+            "SELECT memory_id, content FROM memories WHERE lobe=?1 ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([lobe], |r| {
+            let id: String = r.get(0)?;
+            let content: Vec<u8> = r.get(1)?;
+            Ok((id, content))
+        })?;
+
+        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let mut to_delete: Vec<String> = Vec::new();
+        for row in rows {
+            let (id, content) = row?;
+            let h = blake3::hash(&content).as_bytes().to_owned();
+            let h_arr: [u8; 32] = h.try_into().unwrap();
+            if !seen.insert(h_arr) {
+                to_delete.push(id);
+            }
+        }
+        drop(stmt);
+
+        if to_delete.is_empty() { return Ok(0); }
+
+        let tx = self.db.unchecked_transaction()?;
+        let mut del = tx.prepare("DELETE FROM memories WHERE memory_id=?1")?;
+        let mut cnt = 0usize;
+        for id in &to_delete {
+            del.execute([id])?;
+            cnt += 1;
+        }
+        del.finalize()?;
+        tx.commit()?;
+        Ok(cnt)
     }
 }

@@ -10,6 +10,7 @@ use crate::services::librarian::Librarian;
 use crate::services::memory::Memory;
 
 use crate::commands::init::ensure_initialized_once;
+use crate::commands::{bytes_to_string_owned, HitSource, Prefer, RecallResult};
 
 pub struct Commands {
     memory: Memory,       // one SQLite connection here
@@ -85,75 +86,25 @@ impl Commands {
         recent_ids_in_lobe(&self.memory, lobe, n)
     }
 
-    /// Recall full text (tries hot Memory, then cold via Librarian.fetch).
+    /// Recall full text (auto: hot → archive → dag). Returns just the content string.
     pub fn recall(&self, memory_id: &str) -> Result<Option<String>> {
-        // Hot first
-        if let Some(bytes) = self.memory.recall(memory_id)? {
-            return Ok(Some(String::from_utf8_lossy(&bytes).to_string()));
-        }
-        // Cold only (avoid re-checking hot again)
-        if let Some(bytes) = self.librarian.fetch_cold(&self.memory, memory_id)? {
-            return Ok(Some(String::from_utf8_lossy(&bytes).to_string()));
-        }
-        // DAG fallback via id index
-        if let Some(s) = crate::memory::dag::content_by_id(memory_id)? {
-            return Ok(Some(s));
-        }
-        Ok(None)
-    }
-
-    /// Recall only from hot cache (SQLite). Returns None if missing.
-    pub fn recall_hot(&self, memory_id: &str) -> Result<Option<String>> {
-        if let Some(bytes) = self.memory.recall(memory_id)? {
-            Ok(Some(String::from_utf8_lossy(&bytes).to_string()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Recall only from archive (cold), re-caching on success. Returns None if missing.
-    pub fn recall_archive(&self, memory_id: &str) -> Result<Option<String>> {
-        if let Some(bytes) = self.librarian.fetch_cold(&self.memory, memory_id)? {
-            Ok(Some(String::from_utf8_lossy(&bytes).to_string()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Recall from DAG (by id via index). Does not touch cache.
-    pub fn recall_dag(&self, memory_id: &str) -> Result<Option<String>> {
-        Ok(crate::memory::dag::content_by_id(memory_id)?)
+        Ok(self
+            .recall_any(memory_id, Prefer::Auto)?
+            .map(|r| r.content))
     }
 
     /// Layered recall returning which source was used. prefer: "hot"|"archive"|"dag"|"auto"
     pub fn recall_with_source(&self, memory_id: &str, prefer: Option<&str>) -> Result<Option<(String, String)>> {
-        let p = prefer.unwrap_or("auto");
-        let mut attempt_order: Vec<&str> = match p {
-            "hot" => vec!["hot"],
-            "archive" => vec!["archive"],
-            "dag" => vec!["dag"],
-            _ => vec!["hot", "archive", "dag"],
-        };
-        for which in attempt_order.drain(..) {
-            match which {
-                "hot" => {
-                    if let Some(s) = self.recall_hot(memory_id)? { return Ok(Some((s, "hot".into()))); }
-                }
-                "archive" => {
-                    if let Some(s) = self.recall_archive(memory_id)? { return Ok(Some((s, "archive".into()))); }
-                }
-                "dag" => {
-                    if let Some(s) = self.recall_dag(memory_id)? { return Ok(Some((s, "dag".into()))); }
-                }
-                _ => {}
-            }
-        }
-        Ok(None)
-    }
-
-    /// Alias: multi-tier recall returning (content, source). Same as prefer="auto".
-    pub fn total_recall(&self, memory_id: &str) -> Result<Option<(String, String)>> {
-        self.recall_with_source(memory_id, None)
+        Ok(self
+            .recall_any(memory_id, parse_prefer(prefer))?
+            .map(|r| {
+                let src = match r.source {
+                    HitSource::Hot => "hot",
+                    HitSource::Archive => "archive",
+                    HitSource::Dag => "dag",
+                };
+                (r.content, src.to_string())
+            }))
     }
 
     /// Bulk alias: for each id, attempt multi-tier recall and include id, content, and source.
@@ -163,13 +114,19 @@ impl Commands {
         memory_ids: &[String],
         prefer: Option<&str>,
     ) -> Result<Vec<(String, String, String)>> {
-        let mut out = Vec::with_capacity(memory_ids.len());
-        for id in memory_ids {
-            if let Some((content, source)) = self.recall_with_source(id, prefer)? {
-                out.push((id.clone(), content, source));
-            }
-        }
-        Ok(out)
+        let hits = self.recall_many(memory_ids, parse_prefer(prefer))?;
+        Ok(hits
+            .into_iter()
+            .map(|r| {
+                let src = match r.source {
+                    HitSource::Hot => "hot",
+                    HitSource::Archive => "archive",
+                    HitSource::Dag => "dag",
+                }
+                .to_string();
+                (r.memory_id, r.content, src)
+            })
+            .collect())
     }
 
     pub fn remember(&self, lobe: &str, key: Option<&str>, content: &str) -> Result<String> {
@@ -222,6 +179,16 @@ impl Commands {
         let total = count_rows(&self.memory, Some(lobe_eff))?;
         let archived = count_archived(&self.memory, Some(lobe_eff))?;
         let hot = total.saturating_sub(archived);
+
+        // 2a) AUTO-PRUNE (exact duplicates) after every write to keep hot store clean.
+        if let Ok(deleted) = self.memory.prune_exact_duplicates_in_lobe(lobe_eff) {
+            record_action(
+                "commands",
+                "auto_prune_duplicates",
+                &json!({"lobe": lobe_eff, "deleted": deleted, "hot": hot}),
+                if deleted > 0 { "medium" } else { "low" },
+            );
+        }
 
         if hot >= 5 {
             if let Ok(promoted) = self.memory.promote_all_hot_in_lobe(lobe_eff) {
@@ -316,6 +283,37 @@ impl Commands {
         })
     }
 
+    /// Prune exact duplicates. If `lobe` is Some, prunes within that lobe; otherwise all lobes.
+    pub fn prune_duplicates(&self, lobe: Option<&str>) -> Result<usize> {
+        let total = if let Some(l) = lobe {
+            self.memory.prune_exact_duplicates_in_lobe(l)?
+        } else {
+            // Collect lobes and prune per-lobe
+            let lobes: Vec<String> = {
+                let mut stmt = self
+                    .memory
+                    .db
+                    .prepare("SELECT DISTINCT lobe FROM memories")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                let mut out = Vec::new();
+                for r in rows { out.push(r?); }
+                out
+            };
+            let mut acc = 0usize;
+            for l in lobes {
+                acc += self.memory.prune_exact_duplicates_in_lobe(&l)?;
+            }
+            acc
+        };
+        record_action(
+            "commands",
+            "prune_duplicates",
+            &json!({"lobe": lobe, "deleted": total }),
+            if total > 0 { "medium" } else { "low" },
+        );
+        Ok(total)
+    }
+
     /// Force contract files to match embedded canon.
     pub fn lock_contracts(&self) {
         lock_contracts();
@@ -335,7 +333,161 @@ impl Commands {
 
     /// Promote most recent hot item in lobe to DAG/archive. Returns (memory_id, cid) if promoted.
     pub fn promote_latest_hot(&self, lobe: &str) -> Result<Option<(String, String)>> {
-        self.memory.promote_latest_hot_in_lobe(lobe)
+        // First, promote to DAG (marks archived_cid) using Memory helper
+        let res = self.memory.promote_latest_hot_in_lobe(lobe)?;
+        // Also ensure Archivist stores the bytes on filesystem for cold recall parity
+        if let Some((id, _cid)) = res.as_ref() {
+            let _ = self.librarian.promote_to_archive(&self.memory, id);
+        }
+        Ok(res)
+    }
+
+    /// Rebuild the DAG id-index for a given memory id by linking it to the latest node in its (lobe,key) stream.
+    /// Returns true if an index was written.
+    pub fn reindex_dag_id(&self, memory_id: &str) -> Result<bool> {
+        if let Some((lobe, key)) = self.memory.lobe_key(memory_id)? {
+            return Ok(crate::memory::dag::reindex_id_to_latest(memory_id, &lobe, &key)?);
+        }
+        Ok(false)
+    }
+
+    /// Ensure archive is present and DB pointer (archived_cid) is set for a memory id.
+    /// Returns Some(cid) if ensured, None if the memory could not be found.
+    pub fn ensure_archive_for(&self, memory_id: &str) -> Result<Option<String>> {
+        // If CID already set, ensure the blob exists; if missing, reconstruct from hot or DAG.
+        if let Some(existing_cid) = self.memory.get_archived_cid(memory_id)? {
+            let report = ensure_initialized_once()?;
+            let arch = Archivist::open(report.root.join("archive"))?;
+            match arch.retrieve(&existing_cid) {
+                Ok(bytes) => {
+                    // Re-cache hot under original lobe/key if possible
+                    if let Some((lobe, key)) = self.memory.lobe_key(memory_id)? {
+                        let _ = self.memory.remember(memory_id, &lobe, &key, &bytes);
+                    } else if let Some(node) = crate::memory::dag::load_node_by_id(memory_id)? {
+                        let lobe = node.get("lobe").and_then(|v| v.as_str()).unwrap_or("restored");
+                        let key  = node.get("key").and_then(|v| v.as_str()).unwrap_or("restored");
+                        let _ = self.memory.remember(memory_id, lobe, key, &bytes);
+                    }
+                    return Ok(Some(existing_cid));
+                }
+                Err(_) => {
+                    // Archive object missing — attempt to reconstruct from hot or DAG
+                }
+            }
+        }
+
+        // Load bytes from hot or DAG
+        let bytes_opt = match self.memory.recall(memory_id)? {
+            Some(b) => Some(b),
+            None => crate::memory::dag::content_by_id(memory_id)?.map(|s| s.into_bytes()),
+        };
+        if let Some(bytes) = bytes_opt {
+            // Write archive blob and set DB pointer (open archivist at canonical path)
+            let report = ensure_initialized_once()?;
+            let arch = Archivist::open(report.root.join("archive"))?;
+            let cid = arch.archive(memory_id, &bytes)?;
+            let now = chrono::Utc::now().to_rfc3339();
+            self.memory.mark_archived(memory_id, &cid, &now)?;
+            return Ok(Some(cid));
+        }
+        Ok(None)
+    }
+
+    // -------- Centralized recall --------
+
+    /// Centralized recall: one function to rule them all.
+    /// Tries according to `Prefer`, returns the first hit with its source.
+    pub fn recall_any(&self, memory_id: &str, prefer: Prefer) -> Result<Option<RecallResult>> {
+        use Prefer::*;
+        let order: &[Prefer] = match prefer {
+            Hot => &[Hot],
+            Archive => &[Archive],
+            Dag => &[Dag],
+            Auto => &[Hot, Archive, Dag],
+        };
+
+        for tier in order {
+            match tier {
+                Prefer::Hot => {
+                    if let Some(bytes) = self.memory.recall(memory_id)? {
+                        return Ok(Some(RecallResult {
+                            memory_id: memory_id.to_owned(),
+                            content: bytes_to_string_owned(bytes),
+                            source: HitSource::Hot,
+                        }));
+                    }
+                }
+                Prefer::Archive => {
+                    if let Some(bytes) = self.librarian.fetch_cold(&self.memory, memory_id)? {
+                        return Ok(Some(RecallResult {
+                            memory_id: memory_id.to_owned(),
+                            content: bytes_to_string_owned(bytes),
+                            source: HitSource::Archive,
+                        }));
+                    }
+                    if let Some(_cid) = self.ensure_archive_for(memory_id)? {
+                        if let Some(bytes2) = self.librarian.fetch_cold(&self.memory, memory_id)? {
+                            return Ok(Some(RecallResult {
+                                memory_id: memory_id.to_owned(),
+                                content: bytes_to_string_owned(bytes2),
+                                source: HitSource::Archive,
+                            }));
+                        }
+                    }
+                }
+                Prefer::Dag => {
+                    if let Some(s) = crate::memory::dag::content_by_id(memory_id)? {
+                        return Ok(Some(RecallResult {
+                            memory_id: memory_id.to_owned(),
+                            content: s,
+                            source: HitSource::Dag,
+                        }));
+                    }
+                    // If DAG missing: ensure hot is present (restore from archive if needed), then promote this id to DAG
+                    if self.memory.recall(memory_id)?.is_none() {
+                        let _ = self.librarian.fetch_cold(&self.memory, memory_id)?;
+                    }
+                    if self.memory.recall(memory_id)?.is_some() {
+                        let _ = self.memory.promote_to_dag(memory_id);
+                        if let Some(s2) = crate::memory::dag::content_by_id(memory_id)? {
+                            if let Some(node) = crate::memory::dag::load_node_by_id(memory_id)? {
+                                let lobe = node.get("lobe").and_then(|v| v.as_str()).unwrap_or("restored");
+                                let key  = node.get("key").and_then(|v| v.as_str()).unwrap_or("restored");
+                                self.memory.remember(memory_id, lobe, key, s2.as_bytes())?;
+                            }
+                            return Ok(Some(RecallResult {
+                                memory_id: memory_id.to_owned(),
+                                content: s2,
+                                source: HitSource::Dag,
+                            }));
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Centralized batch recall (keeps order of input ids; drops misses).
+    pub fn recall_many(&self, memory_ids: &[String], prefer: Prefer) -> Result<Vec<RecallResult>> {
+        let mut out = Vec::with_capacity(memory_ids.len());
+        for id in memory_ids {
+            if let Some(hit) = self.recall_any(id, prefer)? {
+                out.push(hit);
+            }
+        }
+        Ok(out)
+    }
+}
+
+// Prefer string shim (backwards compat)
+fn parse_prefer(s: Option<&str>) -> Prefer {
+    match s.unwrap_or("auto") {
+        "hot" => Prefer::Hot,
+        "archive" => Prefer::Archive,
+        "dag" => Prefer::Dag,
+        _ => Prefer::Auto,
     }
 }
 

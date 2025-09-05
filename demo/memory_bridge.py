@@ -40,6 +40,13 @@ class MemoryBridge:
         except Exception:
             return None
 
+    def get(self, memory_id: str, prefer: Optional[str] = None) -> Optional[str]:
+        """Return just content (str) or None, with optional tier preference."""
+        try:
+            return self.cmd.recall_prefer(memory_id, prefer)
+        except Exception:
+            return None
+
     def recall_many(self, memory_ids: List[str], prefer: Optional[str] = None) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         if not memory_ids:

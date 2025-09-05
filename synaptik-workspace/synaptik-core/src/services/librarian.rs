@@ -16,7 +16,7 @@ use crate::services::memory::Memory;
 
 #[derive(Debug)]
 pub struct Librarian {
-    archivist: Option<Archivist>, // file-only cold store
+    archivist: Option<Archivist>, 
 }
 
 impl Librarian {
@@ -38,6 +38,19 @@ impl Librarian {
         let key = key
             .map(|k| k.to_string())
             .unwrap_or_else(|| format!("{}_memory.txt", Utc::now().format("%Y-%m-%dT%H_%M_%S")));
+
+        // Exact dedupe guard: if identical content already exists in this lobe, return existing id.
+        if let Some(existing) = memory.find_exact_duplicate_in_lobe(lobe, content.as_bytes())? {
+            // Touch to reflect freshness, but avoid rewriting content.
+            let _ = memory.touch(&existing);
+            record_action(
+                "librarian",
+                "dedupe_skipped",
+                &json!({"existing_id": existing, "lobe": lobe, "key": key}),
+                "low",
+            );
+            return Ok(existing);
+        }
 
         let memory_id = format!(
             "{}_{}",
@@ -143,7 +156,16 @@ pub fn fetch_cold(&self, memory: &Memory, memory_id: &str) -> Result<Option<Vec<
         if let Some(arch) = &self.archivist {
             match arch.retrieve(&cid) {
                 Ok(bytes) => {
-                    memory.remember(memory_id, "restored", "restored", &bytes)?;
+                    // Try to restore under original lobe/key from DAG metadata; fallback to stable defaults
+                    let (lobe, key) = match crate::memory::dag::load_node_by_id(memory_id)? {
+                        Some(node) => {
+                            let l = node.get("lobe").and_then(|v| v.as_str()).unwrap_or("restored");
+                            let k = node.get("key").and_then(|v| v.as_str()).unwrap_or("restored");
+                            (l.to_string(), k.to_string())
+                        }
+                        None => ("restored".to_string(), "restored".to_string()),
+                    };
+                    memory.remember(memory_id, &lobe, &key, &bytes)?;
                     crate::services::audit::record_action(
                         "librarian",
                         "memory_restored_from_archive",

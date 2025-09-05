@@ -3,7 +3,7 @@ use pyo3::types::{PyDict, PyList};
 use pyo3::PyTypeInfo;
 
 extern crate synaptik_core as syn_core;
-use syn_core::commands::{Commands, EthosReport};
+use syn_core::commands::{Commands, EthosReport, Prefer, HitSource};
 
 fn pyerr<E: std::fmt::Display>(e: E) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
@@ -49,19 +49,44 @@ impl PyCommands {
         self.inner.recent(lobe, n).map_err(pyerr)
     }
 
-    /// Unified recall that returns a dict {content, source} or None.
+    /// Unified recall that returns a dict {id, content, source} or None.
     /// prefer: "hot" | "archive" | "dag" | "auto" (default)
     #[pyo3(signature = (memory_id, prefer=None))]
     fn recall(&self, py: Python<'_>, memory_id: &str, prefer: Option<&str>) -> PyResult<Option<PyObject>> {
-        match self.inner.recall_with_source(memory_id, prefer).map_err(pyerr)? {
-            Some((content, source)) => {
+        let p = match prefer.unwrap_or("auto") {
+            "hot" => Prefer::Hot,
+            "archive" => Prefer::Archive,
+            "dag" => Prefer::Dag,
+            _ => Prefer::Auto,
+        };
+        match self.inner.recall_any(memory_id, p).map_err(pyerr)? {
+            Some(hit) => {
                 let d = PyDict::new_bound(py);
-                d.set_item("content", content)?;
-                d.set_item("source", source)?;
+                d.set_item("id", hit.memory_id)?;
+                d.set_item("content", hit.content)?;
+                let src = match hit.source { HitSource::Hot => "hot", HitSource::Archive => "archive", HitSource::Dag => "dag" };
+                d.set_item("source", src)?;
                 Ok(Some(d.into_any().into_py(py)))
             }
             None => Ok(None),
         }
+    }
+
+    /// Simple recall: return just the content string or None, with an optional tier preference.
+    /// prefer: "hot" | "archive" | "dag" | "auto" (default = auto)
+    #[pyo3(signature = (memory_id, prefer=None))]
+    fn recall_prefer(&self, memory_id: &str, prefer: Option<&str>) -> PyResult<Option<String>> {
+        let p = match prefer.unwrap_or("auto") {
+            "hot" => Prefer::Hot,
+            "archive" => Prefer::Archive,
+            "dag" => Prefer::Dag,
+            _ => Prefer::Auto,
+        };
+        Ok(self
+            .inner
+            .recall_any(memory_id, p)
+            .map_err(pyerr)?
+            .map(|r| r.content))
     }
 
     /// Bulk recall. Returns a list of dicts: [{id, content, source}]
@@ -72,17 +97,20 @@ impl PyCommands {
         memory_ids: Vec<String>,
         prefer: Option<&str>,
     ) -> PyResult<PyObject> {
-        let results = self
-            .inner
-            .total_recall_many(&memory_ids, prefer)
-            .map_err(pyerr)?;
-
+        let p = match prefer.unwrap_or("auto") {
+            "hot" => Prefer::Hot,
+            "archive" => Prefer::Archive,
+            "dag" => Prefer::Dag,
+            _ => Prefer::Auto,
+        };
+        let results = self.inner.recall_many(&memory_ids, p).map_err(pyerr)?;
         let out = PyList::empty_bound(py);
-        for (id, content, source) in results {
+        for r in results {
             let d = PyDict::new_bound(py);
-            d.set_item("id", id)?;
-            d.set_item("content", content)?;
-            d.set_item("source", source)?;
+            d.set_item("id", r.memory_id)?;
+            d.set_item("content", r.content)?;
+            let src = match r.source { HitSource::Hot => "hot", HitSource::Archive => "archive", HitSource::Dag => "dag" };
+            d.set_item("source", src)?;
             out.append(d)?;
         }
         Ok(out.into_any().into_py(py))
@@ -104,6 +132,8 @@ impl PyCommands {
         d.set_item("last_updated", s.last_updated)?;
         Ok(d.into_any().into_py(py))
     }
+
+    // Note: duplicate pruning is automated in the Rust core during writes.
 
    
     fn root(&self) -> PyResult<String> {

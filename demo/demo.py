@@ -1,21 +1,19 @@
-import os
 import re
 from typing import List, Dict
-from rich.console import Console
-from rich.markdown import Markdown
-
-_console: Console | None = Console()
-
-
-def print_assistant(text: str) -> None:
-    """Render assistant output; prefer Markdown via rich if available."""
-    if _console is not None:
-        # Header line for clarity, then render markdown
-        _console.print("🤖")
-        _console.print(Markdown(text or ""))
-    else:
-        print(f"🤖 {text}")
-
+from ui import print_assistant
+from flows import run_demo_flow
+from intents import (
+    looks_like_recent_query,
+    handle_recent_query,
+    looks_like_source_test,
+    handle_source_test,
+    looks_like_recall_sources_query,
+    handle_recall_sources_query,
+    looks_like_action_plan,
+    handle_action_plan,
+    looks_like_root_query,
+    handle_root_query,
+)
 
 from prompts import system_prompt
 from llm_client import chat, MODEL
@@ -23,95 +21,23 @@ from actions import maybe_parse_action, route
 from memory_bridge import MemoryBridge
 
 
-def tail_file(path: str, n: int = 3) -> list[str]:
-    try:
-        with open(path, 'r') as f:
-            lines = f.readlines()
-        return [ln.rstrip('\n') for ln in lines[-n:]]
-    except Exception:
-        return []
+# Precompiled regexes for quick temperature heuristics
+FACT_RE = re.compile(r"\b(what|when|where|who|which|define|explain|fact|facts|cite|citation|exact)\b", re.I)
+CREATIVE_RE = re.compile(r"\b(plan|brainstorm|idea|ideas|design|rewrite|draft|story|creative|solve|solution|approach|explore|refactor|migrate|replace|rebuild|clean\s*slate|start\s*fresh)\b", re.I)
 
 
-def run_demo_flow(mem: MemoryBridge) -> None:
-    print("\n🚀 Running scripted demo...")
-    root = mem.root()
-    print(f"   Root: {root}")
-
-    # 1) Persist a preference
-    pref_text = "User prefers short, friendly greetings"
-    pref_id = mem.remember("preferences", pref_text, "user_pref")
-    print(f"   💾 Saved preference id: {pref_id[:24]}...")
-
-    # 2) Ensure chat lobe reaches 5 to trigger auto-promotion
-    chat_stats_before = mem.stats("chat")
-    before_total = chat_stats_before.get('total', 0)
-    before_arch = chat_stats_before.get('archived', 0)
-    before_hot = max(0, before_total - before_arch)
-    need = max(0, 5 - before_hot)
-    for i in range(need):
-        mem.remember("chat", f"demo chat note {i+1}", None)
-    chat_stats_after = mem.stats("chat")
-    print(f"   📊 Chat before: total={before_total}, archived={before_arch}")
-    print(f"   📊 Chat after:  total={chat_stats_after.get('total',0)}, archived={chat_stats_after.get('archived',0)}")
-
-    # Show filesystem archive objects written under .cogniv/archive
-    try:
-        arch_dir = os.path.join(root, 'archive')
-        if os.path.isdir(arch_dir):
-            objs = []
-            for name in os.listdir(arch_dir):
-                # CIDs are long hex strings; filter non-files or subdirs
-                p = os.path.join(arch_dir, name)
-                if os.path.isfile(p) and len(name) >= 16:
-                    objs.append(name)
-            print(f"   📦 Archive objects: {len(objs)} in .cogniv/archive/")
-            if objs:
-                sample = ", ".join(objs[:2])
-                print(f"      e.g.: {sample}")
-    except Exception:
-        pass
-
-    # 3) Pick a recent chat memory and show its recall source (auto), then force DAG recall
-    chat_ids = mem.recent("chat", 1)
-    if chat_ids:
-        rid = chat_ids[0]
-        # Auto (may be hot/archive/dag depending on state)
-        r_auto = mem.recall(rid, "auto")
-        if isinstance(r_auto, dict):
-            src = r_auto.get('source', 'auto')
-            prev = (r_auto.get('content') or '')[:80]
-            print(f"   🔎 Recall(auto) {rid[:18]}... source={src}, content='{prev}'")
-        # Explicit DAG-only recall to demonstrate cold graph retrieval
-        r_dag = mem.recall(rid, "dag")
-        if isinstance(r_dag, dict) and r_dag.get('content'):
-            prev = (r_dag.get('content') or '')[:80]
-            print(f"   🧩 Recall(dag)  {rid[:18]}... source=dag, content='{prev}'")
-
-    # 4) Lobe separation: preference vs solution
-    mem.remember("solutions", "Final answer: 42 because constraints...", "solution_1")
-    pref_recent = (mem.recent("preferences", 1) or [None])[0]
-    sol_recent = (mem.recent("solutions", 1) or [None])[0]
-    if pref_recent:
-        rp = mem.recall(pref_recent, "auto")
-        if isinstance(rp, dict):
-            print(f"   📁 preferences → {rp.get('content','')[:60]}")
-    if sol_recent:
-        rs = mem.recall(sol_recent, "auto")
-        if isinstance(rs, dict):
-            print(f"   📁 solutions   → {rs.get('content','')[:60]}")
-
-    # 5) Ethics precheck and audit tail
-    res = mem.cmd.precheck_text("I want to kill her", "chat_message")
-    decision = res.get('decision','?')
-    risk = res.get('risk','?')
-    print(f"   🛡️ Precheck: {decision.upper()} (risk={risk})")
-    ethics_log = os.path.join(root, 'logbook', 'ethics.jsonl')
-    tail = tail_file(ethics_log, 3)
-    if tail:
-        print("   📜 Ethics log tail:")
-        for ln in tail:
-            print("      " + ln)
-    print("✅ Demo complete. Continue chatting!")
+def choose_temperature(user_text: str) -> float:
+    t = (user_text or "").lower()
+    # Low temperature for factual queries or source/recent introspection
+    if looks_like_source_test(t) or looks_like_recent_query(t):
+        return 0.25
+    if FACT_RE.search(t):
+        return 0.25
+    # Higher temperature for creative/solution-oriented work
+    if CREATIVE_RE.search(t):
+        return 0.65
+    # Default uses baseline inside llm_client
+    return 0.5
 
 
 def run_repl() -> None:
@@ -146,14 +72,13 @@ def run_repl() -> None:
         recent_ids = mem.recent("preferences", 3)
         if recent_ids:
             startup_memories: list[str] = []
-            name: str | None = None
-            for mid in recent_ids:
-                r = mem.recall(mid)
+            # Batch recall to reduce round-trips into the binding
+            results = mem.recall_many(recent_ids)
+            for r in results:
                 if isinstance(r, dict) and r.get("content"):
-                    text = r["content"][:200]
-                    startup_memories.append(text)
-                    if text.lower().startswith("user_name:"):
-                        name = text.split(":", 1)[1].strip()
+                    text = (r["content"] or "")[:200]
+                    if text:
+                        startup_memories.append(text)
             if startup_memories:
                 print("📚 Context from previous sessions:")
                 for i, memory in enumerate(startup_memories):
@@ -168,7 +93,8 @@ def run_repl() -> None:
                         print("💬 Chat")
                         print("-" * 60)
                         posted_chat_header = True
-                    assistant = chat(convo)
+                    # Slightly higher temp for greeting/rapport
+                    assistant = chat(convo, temperature=0.6)
                     act = maybe_parse_action(assistant)
                     reasoning_text = assistant
                     if act:
@@ -219,56 +145,99 @@ def run_repl() -> None:
                 print(f"❌ Demo error: {e}")
             continue
 
-        # Run local precheck BEFORE hitting the LLM, so audit/ethics logs record
+        # Run local precheck BEFORE hitting the LLM (ensures audit/ethics logs record)
         try:
             pre = mem.cmd.precheck_text(user, "chat_message")
             decision = pre.get("decision", "allow")
             risk = pre.get("risk", "?")
             icon = {"allow":"✅","allow_with_constraints":"⚠️","block":"🚫"}.get(decision,"❓")
             print(f"🛡️ Precheck: {icon} {decision.upper()} | Risk: {risk}")
-            # Show constraints (these guide the LLM on unsafe or constrained inputs)
             constraints = pre.get("constraints") or []
-            if constraints:
-                print(f"   constraints: {constraints}\n")
-            # If soft-allowed with constraints, nudge the model by adding them as context
+            # If soft-allowed, pass constraints directly to the LLM as a minimal system message (no policy hardcoding)
             if decision == "allow_with_constraints" and constraints:
-                convo.append({"role": "user", "content": f"[Apply constraints: {', '.join(constraints)}]"})
-            # If blocked, do not forward the raw input — call the LLM with a safety-specific prompt
+                # Provide only the contract-derived constraints; instruct to reply directly without meta
+                convo.append({
+                    "role": "system",
+                    "content": (
+                        "Contracts decision=ALLOW_WITH_CONSTRAINTS; "
+                        f"risk={risk}; reason={pre.get('reason','')}; "
+                        f"constraints=[{', '.join(constraints)}]. "
+                        "Follow these guidance points while responding. Do not mention or describe constraints, policy, risk, or safety. "
+                        "Do not label your reply as an example; reply directly to the user in natural language."
+                    )
+                })
+            # If blocked, do not forward the raw input — ask for a safe response guided by constraints
             if decision == "block":
-                guidance = (
-                    "If user content is unsafe, do not repeat it. Instead: "
-                    "reframe nonviolent, de-escalate, soften language, and redirect to constructive support."
-                )
-                cons_str = ", ".join(constraints) if constraints else "safety best-practices"
+                # Do not forward the raw harmful input. Provide only the contract signal.
+                cons_str = ", ".join(constraints) if constraints else ""
                 safe_messages = [
-                    {"role": "system", "content": guidance},
+                    {
+                        "role": "system",
+                        "content": (
+                            "Contracts decision=BLOCK; "
+                            f"risk={risk}; reason={pre.get('reason','')}; "
+                            f"constraints=[{cons_str}]. "
+                            "Write a direct, empathetic, de-escalating reply that offers safe, constructive alternatives. "
+                            "Do not mention or describe constraints, policy, risk, or safety. "
+                            "Do not present an example; just reply as the assistant."
+                        ),
+                    },
                     {
                         "role": "user",
-                        "content": (
-                            "The user is distressed and expressed harmful intent. "
-                            f"Please respond safely and constructively, following these constraints: {cons_str}."
-                        ),
+                        "content": "Respond in a warm, concise way directly to the user."
                     },
                 ]
                 try:
-                    assistant = chat(safe_messages)
+                    assistant = chat(safe_messages, temperature=0.2)
                     print_assistant(assistant)
                     convo.append({"role": "assistant", "content": assistant})
                 except Exception as e:
                     print(f"⚠ LLM fallback error: {e}")
-                # Tail the ethics log to demonstrate local auditing
-                root = mem.root()
-                ethics_log = os.path.join(root, 'logbook', 'ethics.jsonl')
-                tail = tail_file(ethics_log, 1)
-                if tail:
-                    print(f"   log: {tail[-1]}")
                 continue
         except Exception as e:
             print(f"⚠ Precheck error (continuing): {e}")
 
+        # Heuristic intent: "show recent memories" with sources — handle locally without LLM
+        if looks_like_recent_query(user):
+            try:
+                handle_recent_query(mem, user, convo)
+            except Exception as e:
+                print(f"❌ Recent fetch error: {e}")
+            continue
+
+        if looks_like_source_test(user):
+            try:
+                handle_source_test(mem, user)
+            except Exception as e:
+                print(f"❌ Source test error: {e}")
+            continue
+
+        # If the user asks for a personalized action plan, prepare context then fall through to LLM
+        if looks_like_action_plan(user):
+            try:
+                handle_action_plan(mem, user, convo)
+            except Exception as e:
+                print(f"❌ Planning context error: {e}")
+
+        # Pure recall/source queries should not invoke LLM
+        elif looks_like_recall_sources_query(user):
+            try:
+                handle_recall_sources_query(mem, user)
+            except Exception as e:
+                print(f"❌ Recall error: {e}")
+            continue
+
+        if looks_like_root_query(user):
+            try:
+                handle_root_query(mem)
+            except Exception as e:
+                print(f"❌ Root/persistence error: {e}")
+            continue
+
         convo.append({"role": "user", "content": user})
         try:
-            assistant = chat(convo)
+            temp = choose_temperature(user)
+            assistant = chat(convo, temperature=temp)
         except Exception as e:
             print(f"❌ API error: {e}")
             print("Skipping this turn...")
@@ -355,8 +324,8 @@ def run_repl() -> None:
         else:
             convo.append({"role": "assistant", "content": assistant})
 
-        if len(convo) > 20:
-            convo = [convo[0]] + convo[-18:]
+        if len(convo) > 12:
+            convo = [convo[0]] + convo[-10:]
 
 
 if __name__ == "__main__":

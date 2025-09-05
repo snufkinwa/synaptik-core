@@ -32,9 +32,9 @@ matches_any = [
 violation = "Benign idiom usage"
 severity = "none"
 constraints = [
-  "clarify_nonliteral_intent",
-  "avoid_violent_metaphors_when_possible"
-]  # still allow; nudge wording if appropriate
+  "acknowledge_frustration",
+  "clarify_nonliteral_intent"
+]  
 
 # ----- Personal threats: explicit high-severity (with pronouns or broad groups) -----
 [[rules]]
@@ -58,6 +58,9 @@ constraints = [
   "avoid_violent_language",
   "reframe_nonviolent",
   "offer_deescalation",
+  "suggest_support_channels",
+  "encourage_conflict_resolution",
+  "suggest_cooldown",
   "do_not_repeat_harmful_phrases"
 ]
 
@@ -77,6 +80,9 @@ constraints = [
   "avoid_violent_language",
   "reframe_nonviolent",
   "offer_deescalation",
+  "suggest_support_channels",
+  "encourage_conflict_resolution",
+  "suggest_cooldown",
   "do_not_repeat_harmful_phrases"
 ]
 
@@ -119,8 +125,9 @@ matches_any = [
 violation = "Technical/benign usage allowed"
 severity = "none"
 constraints = [
-  "prefer_precise_technical_terms",
-  "clarify_nonliteral_intent"
+  "acknowledge_frustration",
+  "avoid_encouraging_destruction",
+  "do_not_refuse"
 ]
 
 # ----- Justification of violence (high) -----
@@ -134,4 +141,57 @@ constraints = [
   "reframe_nonviolent",
   "offer_deescalation",
   "avoid_justification_language"
+]
+
+# ----- Fresh start / rewrite phrasing (allow with constraints; steer away from destructive framing) -----
+[[rules]]
+action = "say"
+contains_any = [
+  "wipe the slate clean",
+  "clean slate",
+  "start fresh",
+  "start from scratch",
+  "fresh codebase",
+  "complete rewrite",
+  "rebuild everything",
+]
+violation = "Fresh-start phrasing"
+violation_code = "fresh_start_meta"
+effect = "allow_with_constraints"
+severity = "low"
+constraints = [
+  "acknowledge_frustration",
+  "prefer_deprecate_over_delete",
+  "favor_incremental_migration",
+  "include_backup_and_rollback",
+  "propose_time_efficient_safe_path",
+  "avoid_encouraging_destruction",
+  "do_not_refuse"
+]
+
+# ----- Safety‑fatigue phrasing (allow with constraints; empathize and steer) -----
+[[rules]]
+action = "say"
+contains_any = [
+  "ignore the safety guidelines",
+  "ignore safety guidelines",
+  "skip safety guidelines",
+  "skip the safety guidelines",
+  "cut corners on safety",
+  "ignore safety to ship",
+  "ignore safety to ship faster",
+  "move faster by ignoring safety",
+  "set aside safety guidelines",
+]
+violation = "Safety fatigue / guidelines avoidance"
+violation_code = "safety_fatigue"
+effect = "allow_with_constraints"
+severity = "low"
+constraints = [
+  "acknowledge_frustration",
+  "reaffirm_safety_importance",
+  "reframe_constructive",
+  "propose_time_efficient_safe_path",
+  "offer_safe_alternatives",
+  "do_not_refuse",
 ]

@@ -18,7 +18,7 @@ Lightweight Rust/Python kernel that gives LLM agents durable memory and auditabl
 - **Local-first workspace** — SQLite cache + content-addressed file storage
 - **Persistent memory** with automatic summarization and reflection  
 - **Built-in ethics** via TOML contracts and audit trails
-- **Python API** — `remember()`, `reflect()`, `recall()`, `stats()`
+- **Python API (MemoryBridge)** — `root()`, `stats()`, `remember()`, `reflect()`, `recent()`, `recall()`, `get()`, `recall_many()`
 - **No cloud dependency** — everything runs locally
 
 ## Quick Start
@@ -38,13 +38,34 @@ maturin develop --release
 - **Note**: Not tested with isolated requirements.txt installation
 
 ```python
-from synaptik_core import PyCommands
+# Ergonomic wrapper around PyCommands with unified recall
+from memory_bridge import MemoryBridge
 
-cmd = PyCommands()
-mid = cmd.remember("chat", "Hello from Synaptik Core.")
-print("Reflection:", cmd.reflect("chat", 20))
-print("Stats:", cmd.stats())
+mem = MemoryBridge()
+
+# Basic ops
+mid = mem.remember("chat", "Hello from Synaptik Core.")
+print("Root:", mem.root())
+print("Stats:", mem.stats())
+print("Reflect:", mem.reflect("chat", 20))
+print("Recent IDs:", mem.recent("chat", 3))
+
+# Unified recall variants
+print("Recall (dict):", mem.recall(mid))                 # {"content": str, "source": "hot|archive|dag"}
+print("Content only:", mem.get(mid, "hot"))             # str | None (preferred tier optional)
+print("Batch recall:", mem.recall_many([mid]))          # list[dict]
 ```
+
+### MemoryBridge API
+- `root()`: Returns workspace root path.
+- `stats(lobe: Optional[str] = None)`: Returns counts by lobe and totals.
+- `remember(lobe: str, content: str, key: Optional[str] = None)`: Stores and returns Memory ID.
+- `reflect(lobe: str, window: int)`: Summarizes recent content for a lobe.
+- `recent(lobe: str, n: int = 10)`: Returns recent Memory IDs.
+- `recall(memory_id: str, prefer: Optional[str] = None)`: `{content, source}` or `None`.
+- `get(memory_id: str, prefer: Optional[str] = None)`: Content string or `None`.
+- `recall_many(memory_ids: list[str], prefer: Optional[str] = None)`: Batch recall.
+ - Convenience: `recent_with_content(lobe, n=3, prefer=None)`, `print_recall_preview(memory_id, prefer=None, width=80)`.
 
 ## Chat Demo
 
