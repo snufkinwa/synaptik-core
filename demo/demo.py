@@ -1,3 +1,17 @@
+"""
+Synaptik Core Groq Chat Demo (REPL)
+
+Usage:
+  - Ensure the Python bindings are built via maturin and dependencies installed.
+  - Put your Groq key in a .env at the repo root (GROQ_API_KEY, GROQ_MODEL).
+  - Run: `python -m demo.demo`
+
+Tips:
+  - Type `:demo` to run a quick scripted end-to-end flow.
+  - To replicate the demo video, open `demo/test_prompts_syn.txt` and paste
+    the prompts phase-by-phase (Phase 1 → 13) into the REPL.
+"""
+
 import re
 from typing import List, Dict
 from ui import print_assistant
@@ -52,6 +66,7 @@ def run_repl() -> None:
     print("   • Check ethics before storing sensitive content")
     print("   • Reference previous conversations using Memory IDs")
     print("\nType ':demo' anytime to run a quick end-to-end demo.")
+    print("Tip: To replicate the demo video, paste prompts from demo/test_prompts_syn.txt (Phase 1 → 13).")
     print("=" * 60)
     # Track whether we've printed the chat area header yet
     posted_chat_header = False
