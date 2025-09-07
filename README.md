@@ -4,8 +4,11 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/snufkinwa/synaptik-core" alt="License"></a>
-  <img src="https://img.shields.io/badge/rust-1.8+-orange?logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/rust-1.7+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?logo=python" alt="Python">
+  <a href="https://pypi.org/project/synaptik-core-beta/">
+  <img src="https://img.shields.io/pypi/v/synaptik-core-beta.svg" alt="PyPI version">
+</a>
   <img src="https://img.shields.io/badge/OpenAI-Hackathon-ff69b4?logo=openai" alt="Hackathon">
 </p>
 
@@ -21,62 +24,66 @@ Lightweight Rust/Python kernel that gives LLM agents durable memory and auditabl
 - **Python API (MemoryBridge)** — `root()`, `stats()`, `remember()`, `reflect()`, `recent()`, `recall()`, `get()`, `recall_many()`
 - **No cloud dependency** — everything runs locally
 
+## Installation
+
+Install from PyPI:
+
+```bash
+pip install synaptik-core-beta
+```
+
+View on [PyPI↗](https://pypi.org/project/synaptik-core-beta/)
+
+- Prebuilt wheels: macOS x86_64 (11+), Linux x86_64 (manylinux2014)
+- Other platforms/arches: build from source (see From Source)
+- Requires Python 3.8+
+
 ## Quick Start
 
-```bash
-# Install (requires Rust + Python 3.8+)
-cd synaptik-workspace/synaptik-core-py
-pip install maturin
-maturin develop --release
+```python
+import synaptik_core
+
+# Initialize command surface
+cmd = synaptik_core.PyCommands()
+
+# Write a memory (lobe = logical namespace)
+mid = cmd.remember("chat", "hello from synaptik")
+
+# Read it back (returns dict with id/content/source)
+print(cmd.recall(mid))
+
+# Recent items within a lobe
+print(cmd.recent("chat", n=5))
+
+# Optional: pre-check against ethos contracts
+print(cmd.precheck_text("generate a friendly reply", purpose="message_generation"))
 ```
 
-## Testing Instructions
+## Testing
 
-- Repository: https://github.com/snufkinwa/synaptik-core
 - Demo entrypoint: `demo/demo.py` (Groq chat demo)
-- Languages: Rust core + Python bindings
+- Uses Python bindings only (installed from PyPI)
 
-### Recommended Setup (Conda)
-
-Conda is the easiest way to build and run Synaptik Core, especially on macOS where wheels install into the active environment.
-
-1) Clone and enter the repo:
+1) Create and activate a Python environment (optional but recommended):
 
 ```bash
-git clone https://github.com/snufkinwa/synaptik-core.git
-cd synaptik-core
+python -m venv .venv && source .venv/bin/activate  # or conda
 ```
 
-2) Create and activate an environment (Python ≥ 3.9 recommended):
+2) Install Synaptik Core from PyPI and demo deps:
 
 ```bash
-conda create -n synaptik python=3.10 -y
-conda activate synaptik
-```
-
-3) Build and install the Python bindings (via maturin/PyO3):
-
-```bash
-cd synaptik-workspace/synaptik-core-py
-pip install maturin
-maturin develop --release
-```
-
-4) Install Python dependencies for the demo:
-
-```bash
-cd ../..
 pip install -r demo/requirements.txt
 ```
 
-5) Add your Groq API key in a `.env` at the project root:
+3) Add your Groq API key in a `.env` at the project root:
 
 ```
 GROQ_API_KEY=your_api_key_here
 GROQ_MODEL=openai/gpt-oss-20b
 ```
 
-6) Run the chat demo:
+4) Run the chat demo:
 
 ```bash
 python -m demo.demo
@@ -119,31 +126,14 @@ You> :demo
 ✅ Demo complete. Continue chatting!
 ```
 
+### From Source (unsupported platforms)
 
-### Development Environment
-- Built and tested on macOS with Miniconda
-- Uses `abi3-py38` stable ABI for Python 3.8+ compatibility
-- Cross-platform support via PyO3 + maturin toolchain
-- Wheel installs directly to active conda Python environment
-- **Note**: Not tested with isolated requirements.txt installation
+If a prebuilt wheel is not available for your platform/architecture, build locally with maturin:
 
-```python
-# Ergonomic wrapper around PyCommands with unified recall
-from memory_bridge import MemoryBridge
-
-mem = MemoryBridge()
-
-# Basic ops
-mid = mem.remember("chat", "Hello from Synaptik Core.")
-print("Root:", mem.root())
-print("Stats:", mem.stats())
-print("Reflect:", mem.reflect("chat", 20))
-print("Recent IDs:", mem.recent("chat", 3))
-
-# Unified recall variants
-print("Recall (dict):", mem.recall(mid))                 # {"content": str, "source": "hot|archive|dag"}
-print("Content only:", mem.get(mid, "hot"))             # str | None (preferred tier optional)
-print("Batch recall:", mem.recall_many([mid]))          # list[dict]
+```bash
+cd synaptik-workspace/synaptik-core-py
+pip install maturin
+maturin develop --release
 ```
 
 ### MemoryBridge API

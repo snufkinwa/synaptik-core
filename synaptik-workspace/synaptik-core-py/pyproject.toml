@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.6,<2"]
+build-backend = "maturin"
+
+[project]
+name = "synaptik-core-beta"
+version = "0.1.1"
+requires-python = ">=3.8"
+description = "Synaptik Core Python bindings (hackathon build)"
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [{ name = "Janay Harris" }]
+license = { text = "Apache-2.0" }
+classifiers = [
+  "Programming Language :: Python",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# build the crate in this dir
+manifest-path = "Cargo.toml"
+# optional, but nice: put wheel in dist/
+bindings = "pyo3"
