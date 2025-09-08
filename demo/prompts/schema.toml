@@ -1,0 +1,15 @@
+[lobes]
+preferences = "Stable, user-confirmed traits (likes, profile, enduring settings)"
+solutions   = "Problems discussed, decisions taken, durable solutions"
+chat        = "Short-lived conversational context worth saving"
+insights    = "Model reflections, principles, patterns"
+"signals/affect" = "Transient emotional state (e.g., frustrated, angry, overwhelmed); not a preference"
+
+[action.remember]
+# required fields
+fields = ["lobe", "content"]
+# optional fields
+optional = ["key", "confidence", "decay_days", "evidence_count"]
+
+[action.precheck]
+fields = ["text", "purpose"]

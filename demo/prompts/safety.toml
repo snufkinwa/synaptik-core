@@ -1,0 +1,22 @@
+[decisions]
+values = ["ALLOW", "ALLOW_WITH_CONSTRAINTS", "BLOCK"]
+
+[templates.refusal]
+text = "I can’t assist with that."
+notes = ["Give safe alternatives only. Do not encourage violence. Acknowledge their pain but do NOT support destructive behavior. No repetition of harmful phrasing."]
+
+[templates.constraints]
+header = "Here’s a safer approach:"
+max_bullets = 5
+
+[risk_rules.low]
+enter = 0.60
+exit  = 0.50   # hysteresis to prevent flapping
+
+# Example routing for constraints
+[constraints.when_ethics_tension]
+apply = [
+  "Clamp to non-destructive steps",
+  "Offer staged rollout or checklist",
+  "Log event to signals/ethics_tension"
+]

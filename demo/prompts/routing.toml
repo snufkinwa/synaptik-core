@@ -1,0 +1,67 @@
+# Deterministic memory routing and promotion rules.
+
+[route.preferences]
+when = [
+  { kind = "explicit_preference", require_confirmation = true }
+]
+deny_if_single_utterance = true
+
+# Name capture into preferences when explicitly provided by the user.
+[route.preferences_name]
+when = [
+  { matches_any_regex = [
+      "\\bmy name is\\s+([A-Z][a-zA-Z'\-]{1,30})\\b",
+      "\\bi am\\s+([A-Z][a-zA-Z'\-]{1,30})\\b",
+      "\\bi'm\\s+([A-Z][a-zA-Z'\-]{1,30})\\b",
+      "\\bcall me\\s+([A-Z][a-zA-Z'\-]{1,30})\\b",
+      "\\bname\\s*[:=]\\s*([A-Z][a-zA-Z'\-]{1,30})\\b"
+    ]
+  }
+]
+write = { set_key = "user_name", format = "Name: {1}" }
+
+[route."signals/ethics_tension"]
+when = [
+  { contains_any = ["ignore safety", "skip guidelines", "cut corners", "ship faster AND safety"] }
+]
+write = { confidence_min = 0.6, decay_days_default = 14 }
+
+[route."signals/affect"]
+when = [
+  { contains_any = [
+      "frustrated", "frustrating", "angry", "furious", "mad", "upset", "annoyed", "irritated",
+      "overwhelmed", "stressed", "burned out", "burnt out", "anxious", "worried", "sad",
+      "disappointed", "exhausted", "tired of", "fed up"
+    ]
+  },
+  { matches_any_regex = [
+      "\\b(i feel|i'm|im)\\s+(so\\s+)?(angry|mad|furious|upset|frustrated|overwhelmed|stressed|anxious|sad)\\b",
+      "\\b(feeling|feel)\\s+(angry|mad|furious|upset|frustrated|overwhelmed|stressed|anxious|sad)\\b"
+    ]
+  }
+]
+# Short-lived; do NOT treat as preferences.
+write = { confidence_min = 0.5, decay_days_default = 14 }
+
+[promotion.persona]
+from = ["signals/ethics_tension", "chat"]
+to   = "preferences"
+require = { min_events = 3, min_confidence = 0.8, user_consent = true }
+
+[dedupe]
+window_messages = 50
+strategy = "semantic+exact"
+
+# Route problem/solution updates, decisions, metrics, constraints → solutions
+[route.solutions]
+when = [
+  { contains_any = [
+      "problem", "issue", "approach", "solution", "decision", "decide",
+      "result", "results", "experiment", "ablation", "evaluation", "metrics",
+      "reduced", "increased", "performance", "latency", "throughput",
+      "budget", "constraint", "constraints", "adversarial training", "debias"
+    ]
+  },
+  { matches_any_regex = ["\\b\\d+%\\b", "\\b\\d+\\s*(GPU\\s*hours?|hrs?|hours|days|weeks)\\b"] }
+]
+write = { confidence_min = 0.5, decay_days_default = 90 }

@@ -12,28 +12,34 @@ Tips:
     the prompts phase-by-phase (Phase 1 → 13) into the REPL.
 """
 
-import re
-from typing import List, Dict
+# Standard library
+import sys
+from pathlib import Path
+import re  # drop if unused
+from typing import Dict, List  # drop if unused
+
+# Add this file's directory to sys.path (script mode only)
+sys.path.append(str(Path(__file__).resolve().parent))
+
+# Local imports
 from ui import print_assistant
 from flows import run_demo_flow
 from intents import (
-    looks_like_recent_query,
-    handle_recent_query,
-    looks_like_source_test,
-    handle_source_test,
-    looks_like_recall_sources_query,
-    handle_recall_sources_query,
-    looks_like_action_plan,
     handle_action_plan,
-    looks_like_root_query,
+    handle_recall_sources_query,
+    handle_recent_query,
     handle_root_query,
+    handle_source_test,
+    looks_like_action_plan,
+    looks_like_recall_sources_query,
+    looks_like_recent_query,
+    looks_like_root_query,
+    looks_like_source_test,
 )
-
-from prompts import system_prompt
-from llm_client import chat, MODEL
+from llm_client import MODEL, chat
 from actions import maybe_parse_action, route
 from memory_bridge import MemoryBridge
-
+from prompts.prompts import system_prompt
 
 # Precompiled regexes for quick temperature heuristics
 FACT_RE = re.compile(r"\b(what|when|where|who|which|define|explain|fact|facts|cite|citation|exact)\b", re.I)
@@ -108,8 +114,8 @@ def run_repl() -> None:
                         print("💬 Chat")
                         print("-" * 60)
                         posted_chat_header = True
-                    # Slightly higher temp for greeting/rapport
-                    assistant = chat(convo, temperature=0.6)
+                    # Lower temperature for greeting to reduce odd phrasing
+                    assistant = chat(convo, temperature=0.35)
                     act = maybe_parse_action(assistant)
                     reasoning_text = assistant
                     if act:
@@ -161,6 +167,7 @@ def run_repl() -> None:
             continue
 
         # Run local precheck BEFORE hitting the LLM (ensures audit/ethics logs record)
+        llm_temp_hint = None  # may lower temperature for constrained replies
         try:
             pre = mem.cmd.precheck_text(user, "chat_message")
             decision = pre.get("decision", "allow")
@@ -169,45 +176,27 @@ def run_repl() -> None:
             print(f"🛡️ Precheck: {icon} {decision.upper()} | Risk: {risk}")
             constraints = pre.get("constraints") or []
             # If soft-allowed, pass constraints directly to the LLM as a minimal system message (no policy hardcoding)
-            if decision == "allow_with_constraints" and constraints:
-                # Provide only the contract-derived constraints; instruct to reply directly without meta
+            if decision == "allow_with_constraints":
+                # Provide contract-derived constraints and explicitly instruct use of the CONSTRAINTS TEMPLATE (no refusal).
+                cons_str = ", ".join(constraints) if constraints else ""
                 convo.append({
                     "role": "system",
                     "content": (
                         "Contracts decision=ALLOW_WITH_CONSTRAINTS; "
                         f"risk={risk}; reason={pre.get('reason','')}; "
-                        f"constraints=[{', '.join(constraints)}]. "
-                        "Follow these guidance points while responding. Do not mention or describe constraints, policy, risk, or safety. "
-                        "Do not label your reply as an example; reply directly to the user in natural language."
+                        f"constraints=[{cons_str}]. "
+                        "Use the CONSTRAINTS TEMPLATE from your system instructions. Do not refuse; do not use the refusal template. "
+                        "If the user proposes ignoring safety to go faster, offer a safer plan that preserves safety while improving speed. "
+                        "Reply directly with practical steps. Do not mention or describe constraints, policy, risk, or safety. "
+                        "Do not label your reply as an example."
                     )
                 })
-            # If blocked, do not forward the raw input — ask for a safe response guided by constraints
+                llm_temp_hint = 0.35
+            # If blocked, do not call the LLM. Use strict refusal template.
             if decision == "block":
-                # Do not forward the raw harmful input. Provide only the contract signal.
-                cons_str = ", ".join(constraints) if constraints else ""
-                safe_messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Contracts decision=BLOCK; "
-                            f"risk={risk}; reason={pre.get('reason','')}; "
-                            f"constraints=[{cons_str}]. "
-                            "Write a direct, empathetic, de-escalating reply that offers safe, constructive alternatives. "
-                            "Do not mention or describe constraints, policy, risk, or safety. "
-                            "Do not present an example; just reply as the assistant."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": "Respond in a warm, concise way directly to the user."
-                    },
-                ]
-                try:
-                    assistant = chat(safe_messages, temperature=0.2)
-                    print_assistant(assistant)
-                    convo.append({"role": "assistant", "content": assistant})
-                except Exception as e:
-                    print(f"⚠ LLM fallback error: {e}")
+                refusal = "I can’t assist with that."
+                print_assistant(refusal)
+                convo.append({"role": "assistant", "content": refusal})
                 continue
         except Exception as e:
             print(f"⚠ Precheck error (continuing): {e}")
@@ -252,6 +241,8 @@ def run_repl() -> None:
         convo.append({"role": "user", "content": user})
         try:
             temp = choose_temperature(user)
+            if llm_temp_hint is not None:
+                temp = min(temp, llm_temp_hint)
             assistant = chat(convo, temperature=temp)
         except Exception as e:
             print(f"❌ API error: {e}")
