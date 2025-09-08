@@ -130,9 +130,9 @@ def handle_root_query(mem: MemoryBridge) -> None:
     except Exception as e:
         print(f"❌ Error verifying persistence: {e}")
     try:
-        st = mem.stats(chosen) or {}
+        st = mem.stats(None) or {}
         if int(st.get("archived", 0)) == 0:
-            print("  ⓘ No archived items detected in this lobe yet. Add a few more items or run :demo to populate archive/DAG.")
+            print("  ⓘ No archived items detected yet. Add a few more items or run :demo to populate archive/DAG.")
     except Exception:
         pass
 
