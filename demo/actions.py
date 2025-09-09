@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 try:
     from .memory_bridge import MemoryBridge
@@ -6,7 +6,7 @@ except ImportError:  # runtime when run as a module
     from memory_bridge import MemoryBridge
 
 
-def maybe_parse_action(text: str) -> Dict[str, Any] | None:
+def maybe_parse_action(text: str) -> Optional[Dict[str, Any]]:
     import json, re
     lines = (text or "").strip().split('\n')
     if lines:

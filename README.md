@@ -45,16 +45,31 @@ Parent Container (Synaptik Core)
 
 ## Installation
 
-Install from PyPI:
+Set up an isolated Python environment (conda or venv) and install dependencies.
+
+Option A — conda (recommended on Apple Silicon):
 
 ```bash
-pip install synaptik-core-beta
+conda create -n synaptik python=3.9 -y
+conda activate synaptik
+python -m pip install --upgrade pip
+pip install -r demo/requirements.txt
 ```
 
-View on [PyPI↗](https://pypi.org/project/synaptik-core-beta/)
+Option B — venv (macOS/Linux):
 
-- Prebuilt wheels: macOS x86_64 (11+), Linux x86_64 (manylinux2014)
-- Other platforms/arches: build from source (see From Source)
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r demo/requirements.txt
+```
+
+View core package on [PyPI↗](https://pypi.org/project/synaptik-core-beta/)
+
+- macOS Apple Silicon arm64; Linux x86_64 (manylinux2014)
+- Windows: no wheel currently; use WSL2 or build from source (experimental)
+- If pip cannot find a wheel for your arch, build from source (see From Source)
 - Requires Python 3.8+
 
 ## Quick Start
@@ -145,7 +160,7 @@ You> :demo
 ✅ Demo complete. Continue chatting!
 ```
 
-### From Source (unsupported platforms)
+### From Source (unsupported platforms, e.g., Windows)
 
 If a prebuilt wheel is not available for your platform/architecture, build locally with maturin:
 
