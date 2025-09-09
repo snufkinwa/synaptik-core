@@ -26,7 +26,7 @@ Lightweight Rust/Python kernel that gives LLM agents durable memory and auditabl
 
 ## Why It Matters
 
-Today’s AI is stateless: it forgets, has no consistent ethics, and leaves no audit trail. That makes it unreliable for domains where trust and accountability matter. Synaptik Core solves this by giving AI agents durable memory, configurable ethical contracts, and verifiable logs. The result is infrastructure that can scale from research projects to enterprise and government use, making AI not just powerful but trustworthy.
+AI today is stateless: it forgets, has no consistent values, and leaves no audit trail. That makes it unreliable in domains where trust and accountability are critical. Synaptik Core solves this by giving AI agents durable memory, enforceable ethical contracts, and verifiable logs. The result is not just smarter AI, but infrastructure that can be trusted in research, education, enterprise, and government.  
 
 ## Installation
 
