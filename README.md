@@ -26,7 +26,22 @@ Lightweight Rust/Python kernel that gives LLM agents durable memory and auditabl
 
 ## Why It Matters
 
-AI today is stateless: it forgets, has no consistent values, and leaves no audit trail. That makes it unreliable in domains where trust and accountability are critical. Synaptik Core solves this by giving AI agents durable memory, enforceable ethical contracts, and verifiable logs. The result is not just smarter AI, but infrastructure that can be trusted in research, education, enterprise, and government.  
+LLMs are like toddlers: sponges for patterns, but unsafe without guidance.  
+Just as a toddler needs a parent to cross the street, an LLM needs an outer layer that enforces safe, accountable behavior.  
+
+Even in software, React has a **parent container** that wraps and organizes child components — without it, the system breaks down.  
+
+**Synaptik Core is that container for AI:** durable memory, enforceable ethics, and verifiable accountability.
+
+```md
+Parent Container (Synaptik Core)
+├── Memory Management
+├── Ethics Enforcement
+└── Child Component (LLM)
+    ├── Pattern Recognition
+    ├── Creative Output
+    └── Reasoning
+```
 
 ## Installation
 
