@@ -468,6 +468,7 @@ dependencies = [
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
+ "serde",
  "unindent",
 ]
 
@@ -743,6 +744,8 @@ name = "synaptik-core-py"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "chrono",
  "pyo3",
  "serde_json",
  "synaptik-core",

@@ -13,3 +13,26 @@ optional = ["key", "confidence", "decay_days", "evidence_count"]
 
 [action.precheck]
 fields = ["text", "purpose"]
+
+[action.branch_hop]
+# Parameterized branch-hopping replay demo.
+# Use when the user explicitly asks to explore alternate branches or timelines.
+# The engine chooses a base snapshot from the lobe if not provided.
+# All fields optional; reasonable defaults are used when omitted.
+optional = [
+  "lobe",
+  "base_id",
+  "base_path",
+  "seed",
+  "branch_a",
+  "branch_b",
+  "a_steps",
+  "b_steps",
+]
+
+[action.trace_path]
+fields = ["path_name"]
+optional = ["limit"]
+
+[action.recall_latest_on_path]
+fields = ["path_name"]

@@ -12,6 +12,46 @@ ACTIONS (always a single JSON object on the final line if used):
 {"action":"verify_persistence","args":{}}
 {"action":"reflect","args":{"lobe":"chat","window":50}}
 {"action":"precheck","args":{"text":"content to check","purpose":"memory_storage"}}
+{"action":"branch_hop","args":{}}
+{"action":"branch_hop","args":{"lobe":"solutions","branch_a":"plan-a","branch_b":"plan-b","a_steps":2,"b_steps":1}}
+{"action":"trace_path","args":{"path_name":"plan-a","limit":10}}
+{"action":"trace_path","args":{"path_name":"plan-b","limit":10}}
+{"action":"recall_latest_on_path","args":{"path_name":"plan-a"}}
+{"action":"recall_latest_on_path","args":{"path_name":"plan-b"}}
+
+NEURO‑OPS VOCAB (for explanations; engine uses these names):
+- sprout_dendrite(path, base=None, lobe=None) → start a branch from a base (idempotent, normalized)
+- encode_engram(path, content, meta=None) → append an engram with auto provenance (ethics‑gated)
+- systems_consolidate(src_path, dst_path="cortex") → fast‑forward consolidate to cortex if ancestor
+- engram_head(path) / set_engram_head(path, cid) → get/set the latest engram on a path
+- reconsolidate_paths(src_path, dst_path="cortex", note) → future merge (2 parents); FF until supported
+
+PROVENANCE (cite sources):
+- Cite for newest on a path: {"action":"cite_sources","args":{"path_name":"plan-a"}}
+- Cite for a specific snapshot: {"action":"cite_sources","args":{"snapshot_id":"<blake3_hash>"}}
+- Cite for a stored memory id: {"action":"cite_sources","args":{"memory_id":"preferences_<id>"}}
+
+REPLAY / BRANCH HOPPING (when and how):
+- Use replay only when the user asks to explore alternative solution paths, "branch hop", "replay", or to "show a branch timeline". Do not invoke it during normal Q&A.
+- The engine auto-selects a reasonable base snapshot from the requested lobe (default "chat"). You may override via args: `base_id`, `base_path`, or `seed`.
+- Branch names are sanitized to path IDs (e.g., `plan-a` → `plan_a`).
+- After branching, use `trace_path` to visualize a path newest→oldest, or `recall_latest_on_path` to fetch the most recent snapshot on a path.
+- Keep branches short in demos (2–3 steps). Prefer concise JSON payloads like `{"step":"A1","note":"…"}`.
+
+WHEN NOT TO USE REPLAY:
+- Don’t call branch_hop unless the user explicitly mentions branches/hopping/replay/timeline.
+- Don’t use replay to explore generic ideas; answer directly unless asked to split into branches.
+- Don’t mix a tool call with a normal answer unless the user also asked to show timelines or recall from a branch.
+
+Replay examples:
+- Minimal: {"action":"branch_hop","args":{}}
+- Explicit names/steps: {"action":"branch_hop","args":{"lobe":"solutions","branch_a":"plan-a","branch_b":"plan-b","a_steps":2,"b_steps":1}}
+- Show timelines: {"action":"trace_path","args":{"path_name":"plan-a","limit":10}}
+- Recall latest: {"action":"recall_latest_on_path","args":{"path_name":"plan-b"}}
+
+Notes:
+- To visualize both branches with a shared base as an ASCII tree, the agent supports plain language like "show the visual timeline for both branches" — no action JSON needed.
+- Audit trail requests (ethics/contract checks) are handled locally without tool calls; the agent prints recent decisions and a contract file hash.
 
 ROUTING (strong guidance):
 - Put problem/solution discussions, decisions, results, metrics, and constraints in the "solutions" lobe.

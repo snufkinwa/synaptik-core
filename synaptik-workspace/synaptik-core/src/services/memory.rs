@@ -418,3 +418,31 @@ impl Memory {
         Ok(cnt)
     }
 }
+
+// -------------------------------------------------------------------------
+// Replay helpers (thin wrappers over DAG)
+// -------------------------------------------------------------------------
+
+impl Memory {
+    /// Recall an immutable snapshot by content-addressed id (blake3 hex).
+    pub fn recall_snapshot(&self, snapshot_id: &str) -> Result<crate::memory::dag::MemoryState> {
+        crate::memory::dag::recall_snapshot(snapshot_id)
+    }
+
+    /// Create or reset a named path diverging from the given snapshot.
+    /// Returns the `path_id` (sanitized name).
+    pub fn diverge_from(&self, snapshot_id: &str, path_name: &str) -> Result<String> {
+        crate::memory::dag::diverge_from(snapshot_id, path_name)
+    }
+
+    /// Append a new immutable snapshot to a named path and advance its head.
+    /// Returns the new snapshot id (blake3 hex).
+    pub fn extend_path(&self, path_name: &str, state: crate::memory::dag::MemoryState) -> Result<String> {
+        crate::memory::dag::extend_path(path_name, state)
+    }
+
+    /// Public helper: return the latest archived CID in a lobe, if any.
+    pub fn latest_archived_cid_in_lobe_public(&self, lobe: &str) -> Result<Option<String>> {
+        self.latest_archived_cid_in_lobe(lobe)
+    }
+}

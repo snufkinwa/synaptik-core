@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{thread, time::Duration};
 
 use rusqlite::Connection;
+use serde_json::Value;
 
 use synaptik_core::commands::Commands;
 use synaptik_core::services::archivist::Archivist;
@@ -767,4 +768,196 @@ fn commands_auto_prune_removes_existing_duplicates() {
         )
         .expect("count after");
     assert_eq!(after, 1, "auto prune should reduce duplicates to 1");
+}
+
+/// Provenance: snapshot_meta, cite_sources, and trace_path should reflect stored sources and lineage.
+#[test]
+fn dag_provenance_snapshot_meta_and_citations() -> anyhow::Result<()> {
+    use serde_json::json;
+
+    // Ensure init and command surface
+    let _ = ensure_initialized_once().expect("init");
+    let cmds = Commands::new("ignored", None).expect("commands new");
+
+    // Unique namespace
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let lobe = format!("prov_e2e_{}", ns);
+    let key = "main";
+
+    // Seed a base snapshot with provenance
+    let content0 = json!({"t": 0}).to_string();
+    let src_a = json!({
+        "kind": "doc",
+        "uri": "file:///notes/paper.pdf#p=3",
+        "cid": "blake3:aaa111",
+        "range": {"start": 120, "end": 245},
+        "title": "Paper on X",
+        "added_by": "librarian",
+        "ts": "2025-09-10T18:22:00Z"
+    });
+    let src_b = json!({
+        "kind": "url",
+        "uri": "https://example.com/post/42",
+        "cid": "blake3:bbb222",
+        "title": "Blog 42",
+        "added_by": "librarian",
+        "ts": "2025-09-10T18:23:00Z"
+    });
+    let meta0 = json!({
+        "lobe": lobe,
+        "key": key,
+        "provenance": { "sources": [src_a, src_b, // duplicate A to test dedupe
+                                        {"kind":"doc","uri":"file:///notes/paper.pdf#p=3","cid":"blake3:aaa111","range":{"start":120,"end":245}} ]}
+    });
+    let _node_file = synaptik_core::memory::dag::save_node(
+        &format!("prov_s0_{}", ns),
+        &content0,
+        &meta0,
+        &[],
+    )?;
+    let hash0 = blake3::hash(content0.as_bytes()).to_hex().to_string();
+
+    // Snapshot meta includes provenance
+    let meta = cmds.dag_snapshot_meta(&hash0).expect("snapshot_meta");
+    assert!(meta.get("provenance").is_some());
+
+    // Cite sources flattens and de-dupes
+    let cites = cmds.dag_cite_sources(&hash0).expect("cite_sources");
+    assert_eq!(cites.len(), 2, "should dedupe duplicate sources");
+
+    // Create a path and extend it; trace should show newest -> oldest
+    let path = format!("prov_path_{}", ns);
+    let _ = synaptik_core::memory::dag::diverge_from(&hash0, &path)?;
+    let state1 = synaptik_core::memory::dag::MemoryState {
+        content: json!({"t": 1}).to_string(),
+        meta: json!({"lobe": format!("prov_e2e_{}", ns), "key": &path}),
+    };
+    let new_hash = synaptik_core::memory::dag::extend_path(&path, state1)?;
+    let line = cmds.dag_trace_path(&path, 10).expect("trace_path");
+    assert!(line.len() >= 2);
+    let head_hash = line[0]
+        .get("hash").and_then(|v| v.as_str()).unwrap_or("")
+        .to_string();
+    assert_eq!(head_hash, new_hash);
+
+    Ok(())
+}
+/// Replay mode: recall a snapshot by hash, diverge a named path, and extend it.
+#[test]
+fn dag_rewind_and_branch_flow() -> anyhow::Result<()> {
+    // Ensure canonical init; tests share the same .cogniv root
+    let _ = ensure_initialized_once().expect("init");
+
+    // Use a unique namespace to avoid collisions
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    // Seed an initial immutable snapshot directly into the DAG
+    let lobe = format!("replay_e2e_{}", ns);
+    let key = "main";
+    let content0 = serde_json::json!({"t": 0}).to_string();
+    let meta0 = serde_json::json!({"lobe": lobe, "key": key});
+    let _node_file = synaptik_core::memory::dag::save_node(
+        &format!("s0_{}", ns),
+        &content0,
+        &meta0,
+        &[],
+    )?;
+    let hash0 = blake3::hash(content0.as_bytes()).to_hex().to_string();
+
+    // Recall snapshot by its content-addressed id
+    let s1 = synaptik_core::memory::dag::recall_snapshot(&hash0)?;
+    let v1: serde_json::Value = serde_json::from_str(&s1.content)?;
+    assert_eq!(v1["t"], 0);
+
+    // Diverge a named path from that snapshot
+    let path = format!("alt_{}", ns);
+    let _path_id = synaptik_core::memory::dag::diverge_from(&hash0, &path)?;
+
+    // Extend the path with a new immutable snapshot
+    let state2 = synaptik_core::memory::dag::MemoryState {
+        content: serde_json::json!({"t": 1}).to_string(),
+        meta: serde_json::json!({"lobe": format!("replay_e2e_{}", ns), "key": &path}),
+    };
+    let new_hash = synaptik_core::memory::dag::extend_path(&path, state2)?;
+    assert!(!new_hash.is_empty());
+
+    Ok(())
+}
+
+/// DAG write integrity: promoting a hot row writes node + indexes consistently
+#[test]
+fn dag_writes_are_consistent() -> anyhow::Result<()> {
+    // Fresh logical root via unique lobe/key to avoid test interference
+    let cmds = Commands::new("ignored", None).expect("commands new");
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let lobe = format!("dag_e2e_{}", ns);
+    let key = "dag_test_key";
+
+    // 1) Write a single hot row with a known key
+    let mem_id = cmds.remember(&lobe, Some(key), "hello dag write")?;
+
+    // 2) Promote latest hot → obtain (id, cid). Also writes archive and DAG node + indexes.
+    let (pid, cid) = cmds
+        .promote_latest_hot(&lobe)?
+        .expect("expected a promotion result");
+    assert_eq!(pid, mem_id, "promoted id should match written row");
+
+    // 3) Inspect refs/hashes to get node filename; confirm node exists.
+    let report = ensure_initialized_once().expect("init");
+    let hashes_ref = report.root.join("refs").join("hashes").join(format!("{}.json", cid));
+    assert!(hashes_ref.exists(), "hash index should exist");
+    let idx_bytes = std::fs::read(&hashes_ref)?;
+    let idx_v: Value = serde_json::from_slice(&idx_bytes)?;
+    let node_name = idx_v.get("node").and_then(|x| x.as_str()).unwrap_or("");
+    assert!(!node_name.is_empty(), "hash index must contain node filename");
+    let node_path = report.root.join("dag").join("nodes").join(node_name);
+    assert!(node_path.exists(), "node file must exist for cid");
+
+    // 4) Validate node contents: id/lobe/key/hash/content present
+    let node_bytes = std::fs::read(&node_path)?;
+    let node_v: Value = serde_json::from_slice(&node_bytes)?;
+    assert_eq!(node_v.get("hash").and_then(|x| x.as_str()), Some(cid.as_str()));
+    assert_eq!(node_v.get("id").and_then(|x| x.as_str()), Some(mem_id.as_str()));
+    assert_eq!(node_v.get("lobe").and_then(|x| x.as_str()), Some(lobe.as_str()));
+    assert_eq!(node_v.get("key").and_then(|x| x.as_str()), Some(key));
+    assert!(node_v.get("content").and_then(|x| x.as_str()).unwrap_or("").contains("hello dag write"));
+
+    // 5) Validate stream ref was updated (latest_node/last_hash)
+    let stream_name = format!("{}__{}", lobe, key);
+    let stream_ref = report
+        .root
+        .join("refs")
+        .join("streams")
+        .join(format!("{}.json", stream_name));
+    assert!(stream_ref.exists(), "stream ref should exist");
+    let sref_bytes = std::fs::read(&stream_ref)?;
+    let sref_v: Value = serde_json::from_slice(&sref_bytes)?;
+    assert_eq!(sref_v.get("latest_node").and_then(|x| x.as_str()), Some(node_name));
+    assert_eq!(sref_v.get("last_hash").and_then(|x| x.as_str()), Some(cid.as_str()));
+
+    // 6) Validate id index maps memory_id -> node
+    let id_ref = report
+        .root
+        .join("refs")
+        .join("ids")
+        .join(format!("{}.json", mem_id));
+    assert!(id_ref.exists(), "id index should exist for memory id");
+    let id_bytes = std::fs::read(&id_ref)?;
+    let id_v: Value = serde_json::from_slice(&id_bytes)?;
+    assert_eq!(id_v.get("node").and_then(|x| x.as_str()), Some(node_name));
+
+    // 7) Validate archive object exists for cid
+    let arch_path = report.root.join("archive").join(&cid);
+    assert!(arch_path.exists(), "archive object must exist for cid");
+
+    Ok(())
 }

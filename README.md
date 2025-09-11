@@ -21,9 +21,17 @@ Lightweight Rust/Python core library that gives LLM agents durable memory and au
 
 - **Local-first workspace** — SQLite cache + content-addressed file storage
 - **Persistent memory** with automatic summarization and reflection  
+- **Rewind & Diverge** — revisit any past memory, branch into a new thought stream, and preserve the full history of the mind  
 - **Built-in ethics** via TOML contracts and audit trails
-- **Python API (MemoryBridge)** — `root()`, `stats()`, `remember()`, `reflect()`, `recent()`, `recall()`, `get()`, `recall_many()`
+- **Python API (MemoryBridge)** — `root()`, `stats()`, `remember()`, `reflect()`, `recent()`, `recall()`, `get()`, `recall_many()`, plus helpers `recent_with_content()`, `print_recall_preview()`
+- **Python Bindings (PyCommands)** — functions used in the demo (no Rust internals):
+  - Ethics: `precheck_text()`
+  - Replay: `seed_base_from_lobe()`, `last_recalled_id()`, `recall_snapshot()`, `recall_and_diverge()`, `extend_path()`, `trace_path()`, `recall_latest_on_path()`, `cite_sources()`
+  - Neuroscience ops: `sprout_dendrite()`, `encode_engram()`, `systems_consolidate()`, `merge()`
+  - Path helpers: `dag_head()`, `update_path_head()`
+  - Misc: `root()`
 - **No cloud dependency** — everything runs locally
+
 
 ## Installation
 

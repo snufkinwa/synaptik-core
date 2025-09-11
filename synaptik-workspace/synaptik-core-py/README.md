@@ -1,80 +1,82 @@
 <p align="center"><img src="https://res.cloudinary.com/dindjf2vu/image/upload/v1757209651/synaptik_vt1cpy.png"/></p>
 
-# Synaptik Core (Python bindings)
+# Synaptik Core (Python)
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/snufkinwa/synaptik-core" alt="License"></a>
-<a href="https://pypi.org/project/synaptik-core-beta/">
-  <img src="https://img.shields.io/pypi/v/synaptik-core-beta.svg" alt="PyPI version">
-</a>
+  <a href="https://pypi.org/project/synaptik-core-beta/"><img src="https://img.shields.io/pypi/v/synaptik-core-beta.svg" alt="PyPI version"></a>
   <img src="https://img.shields.io/badge/OpenAI-Hackathon-ff69b4?logo=openai" alt="Hackathon">
 </p>
 
-**Synaptik Core** is the memory, ethics, and audit substrate for trustworthy AI agents.  
-This package provides Python bindings for the Rust core engine.
 
+Python bindings for Synaptik Core — memory, ethics, and audit for trustworthy agents.
 
-##  Installation
-
-Install from PyPI (prebuilt wheels available):
+## Install
 
 ```bash
 pip install synaptik-core-beta
 ```
 
-- Prebuilt wheels: macOS x86_64 (11+), Linux x86_64 (manylinux2014)
-- Other platforms/arches: build from source (see below)
-- Requires Python 3.8+
-
-
-## ⚡ Quick Start
-
-Install the package, then use the `PyCommands` class from the `synaptik_core` module.
-
-```bash
-pip install synaptik-core-beta
-```
+## Quick Start
 
 ```python
-import synaptik_core
+import synaptik_core, json
 
-# Initialize command surface
 cmd = synaptik_core.PyCommands()
 
-# Write a memory (lobe = logical namespace)
-memory_id = cmd.remember("chat", "hello from alice")
+# Write + read
+mid = cmd.remember("chat", "hello")
+print(cmd.recall(mid))                 # -> {id, content, source}
 
-# Read it back (returns dict with id/content/source)
-print(cmd.recall(memory_id))
+# Prefer a tier explicitly
+print(cmd.recall(mid, prefer="hot"))  # -> {id, content, source="hot"}
 
-# Recent items within a lobe
-print(cmd.recent("chat", n=5))
+# Recent IDs (newest -> oldest)
+print(cmd.recent("chat", 5))
 
-# Pre-check text against ethos contracts
-print(cmd.precheck_text("generate a friendly reply", purpose="message_generation"))
+# Ethics precheck
+print(cmd.precheck_text("hi", purpose="message_generation"))
+
+# Replay (immutable snapshots) — no hashes required
+path = cmd.begin_branch("chat", "alt")      # resolves base automatically
+new_hash = cmd.extend_path(path, json.dumps({"t": 1}))
+print(cmd.recall_latest_on_path(path))        # -> {content, meta}
+
+# Provenance (citations)
+print(cmd.cite_sources(new_hash))
+
 ```
 
-##  Features
+## Branching and Consolidation (FF‑only)
 
-*  **Contract-based safeguards** — run WASM contracts to enforce rules
-*  **Persistent memory** — short-term (SQLite hot cache) + long-term archival
-* **Transparent audit log** — append-only JSONL for all decisions
-*  **Resource limits** — bounded execution for safe, deterministic behavior
+High-level helpers move seeding, normalization, and provenance into the core.
 
-## 🛠 Development
+```python
+import synaptik_core as sc
+cmd = sc.PyCommands()
 
-This package is built with [Maturin](https://github.com/PyO3/maturin) and [PyO3](https://pyo3.rs/).
-Rust ≥ 1.70 and Python ≥ 3.8 required for local builds.
+# Sprout a dendrite; base resolution:
+# - base=None,lobe=None: start from head('cortex') if present, else seed from 'chat'
+# - base provided: interpreted as an existing path name (if it exists), otherwise as a CID
+base_cid = cmd.sprout_dendrite(path="feature-x", base=None, lobe=None)
 
-From source (for unsupported platforms/arches):
+# Encode an engram (Ethos-gated) with optional meta
+cid = cmd.encode_engram(path="feature-x", content="...", meta={"file": "lru.rs"})
 
-```bash
-# in this directory
-pip install maturin
-maturin develop --release
+# Systems consolidation to cortex (FF-only; errors if not FF)
+head = cmd.systems_consolidate(src_path="feature-x", dst_path="cortex")
+
+# Inspect history and recall
+trace = cmd.trace_path("feature-x", limit=10)
+snap = cmd.recall(head)           # dict or None
+content = cmd.recall_prefer(head) # str or None
 ```
 
+Notes:
+- Paths normalize to lowercase; “feature-x” and “feature_x” are equivalent.
+- Consolidation is fast‑forward only; merges are not yet supported.
+- Prefer `sprout_dendrite()/encode_engram()/systems_consolidate()`; legacy `begin_branch/extend_path` remain for compatibility. Aliases `branch/append/consolidate` are available.
 
-## 📄 License
+## License
 
-Licensed under the [Apache 2.0 License](https://www.apache.org/licenses/LICENSE-2.0).
+Apache-2.0 — see `LICENSE`.

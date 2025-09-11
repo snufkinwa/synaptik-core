@@ -36,6 +36,18 @@ fn ids_ref_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
+fn hashes_ref_dir() -> Result<PathBuf> {
+    let p = ensure_initialized_once()?.root.join("refs").join("hashes");
+    fs::create_dir_all(&p)?;
+    Ok(p)
+}
+
+fn paths_ref_dir() -> Result<PathBuf> {
+    let p = ensure_initialized_once()?.root.join("refs").join("paths");
+    fs::create_dir_all(&p)?;
+    Ok(p)
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -110,6 +122,26 @@ fn read_id_index(id: &str) -> Result<Option<IdIndex>> {
     Ok(Some(idx))
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HashIndex {
+    node: String,
+}
+
+fn write_hash_index(hash: &str, node: &str) -> Result<()> {
+    let p = hashes_ref_dir()?.join(format!("{}.json", sanitize(hash)));
+    let idx = HashIndex { node: node.to_string() };
+    write_atomic(&p, &serde_json::to_vec_pretty(&idx)?)
+}
+
+fn read_hash_index(hash: &str) -> Result<Option<HashIndex>> {
+    let p = hashes_ref_dir()?.join(format!("{}.json", sanitize(hash)));
+    if !p.exists() { return Ok(None); }
+    let bytes = fs::read(&p)?;
+    let idx: HashIndex = serde_json::from_slice(&bytes).unwrap_or_else(|_| HashIndex { node: String::new() });
+    if idx.node.is_empty() { return Ok(None); }
+    Ok(Some(idx))
+}
+
 // ---------- public API (used by Memory) ----------
 
 /// Save a node for (lobe,key) stream if content changed. Returns the node file name.
@@ -145,6 +177,20 @@ pub fn save_node(
         sref.latest_node.clone()
     };
 
+    // Merge provided meta (if object) with our required fields. Always update updated_at and cid/hash.
+    let mut meta_obj: serde_json::Map<String, Value> = match meta.clone() {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    if !meta_obj.contains_key("lobe") { meta_obj.insert("lobe".into(), Value::String(lobe.to_string())); }
+    if !meta_obj.contains_key("key") { meta_obj.insert("key".into(), Value::String(key.to_string())); }
+    if !meta_obj.contains_key("created_at") { meta_obj.insert("created_at".into(), Value::String(ts.clone())); }
+    // Always set these
+    meta_obj.insert("updated_at".into(), Value::String(ts.clone()));
+    meta_obj.insert("cid".into(), Value::String(h.clone()));
+    let summary_len = meta.pointer("/summary").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+    meta_obj.insert("summary_len".into(), serde_json::json!(summary_len));
+
     let node = serde_json::json!({
         "id": id,
         "ts": ts,
@@ -153,30 +199,19 @@ pub fn save_node(
         "parent": parent,
         "hash": h,
         "content": content_utf8,
-        "meta": {
-            "lobe":         meta.get("lobe").cloned().unwrap_or(serde_json::json!(lobe)),
-            "key":          meta.get("key").cloned().unwrap_or(serde_json::json!(key)),
-            "version_id":   meta.get("version_id").cloned().unwrap_or(serde_json::json!(null)),
-            "etag":         meta.get("etag").cloned().unwrap_or(serde_json::json!(null)),
-            "content_type": meta.get("content_type").cloned().unwrap_or(serde_json::json!(null)),
-            "created_at":   meta.get("created_at").cloned().unwrap_or(serde_json::json!(ts)),
-            "updated_at":   serde_json::json!(ts),
-            "cid":          meta.get("cid").cloned().unwrap_or(serde_json::json!(h)),
-            "summary_len":  meta.pointer("/summary")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.len()).unwrap_or(0),
-        },
+        "meta": Value::Object(meta_obj),
     });
 
     write_atomic(&node_path, &serde_json::to_vec_pretty(&node)?)?;
 
     sref.latest_node = Some(fname.clone());
-    sref.last_hash = Some(h);
+    sref.last_hash = Some(h.clone());
     sref.updated_at = Some(ts);
     write_stream_ref(lobe, key, &sref)?;
 
-    // Maintain a quick id -> node index to avoid directory scans.
+    // Maintain quick indexes to avoid directory scans.
     let _ = write_id_index(id, &fname, lobe, key);
+    let _ = write_hash_index(&h, &fname);
 
     Ok(fname)
 }
@@ -218,6 +253,267 @@ pub fn reindex_id_to_latest(id: &str, lobe: &str, key: &str) -> Result<bool> {
     Ok(false)
 }
 
+// ---------- simple content search (newest-first) ----------
+
+/// Search DAG nodes for content containing all words (case-insensitive), newest-first.
+/// Returns a list of minimal dicts: [{"hash", "id", "ts"}]
+pub fn search_content_words(words: &[String], limit: usize) -> Result<Vec<Value>> {
+    let dir = dag_nodes_dir()?;
+    let mut names: Vec<String> = Vec::new();
+    for e in fs::read_dir(&dir)? {
+        let path = e?.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // newest-first by filename (timestamp prefix, lexicographically sortable)
+    names.sort();
+    names.reverse();
+
+    let words_lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    let mut out: Vec<Value> = Vec::new();
+    for name in names {
+        let v = load_node(&name)?;
+        let content = v.get("content").and_then(|x| x.as_str()).unwrap_or("");
+        let lc = content.to_lowercase();
+        let mut ok = true;
+        for w in &words_lower {
+            if !lc.contains(w) { ok = false; break; }
+        }
+        if ok {
+            let hash = v.get("hash").and_then(|x| x.as_str()).unwrap_or("");
+            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            let ts = v.get("ts").and_then(|x| x.as_str()).unwrap_or("");
+            out.push(serde_json::json!({ "hash": hash, "id": id, "ts": ts }));
+            if out.len() >= limit { break; }
+        }
+    }
+    Ok(out)
+}
+
+// ---------- Replay Mode (branching paths over immutable snapshots) ----------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryState {
+    pub content: String,
+    pub meta: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct PathRef {
+    name: String,
+    base_snapshot: String,         // content hash used to seed the path
+    base_node: String,             // node filename for the base snapshot
+    head_node: String,             // current head node filename in this path
+    created_at: String,
+    updated_at: String,
+}
+
+fn path_id_from_name(name: &str) -> String {
+    sanitize(name)
+}
+
+fn read_path_ref(path_name: &str) -> Result<Option<PathRef>> {
+    let id = path_id_from_name(path_name);
+    let p = paths_ref_dir()?.join(format!("{}.json", id));
+    if !p.exists() { return Ok(None); }
+    let bytes = fs::read(&p)?;
+    let r: PathRef = serde_json::from_slice(&bytes).unwrap_or_default();
+    if r.head_node.is_empty() { return Ok(None); }
+    Ok(Some(r))
+}
+
+fn write_path_ref(path_name: &str, r: &PathRef) -> Result<()> {
+    let id = path_id_from_name(path_name);
+    let p = paths_ref_dir()?.join(format!("{}.json", id));
+    write_atomic(&p, &serde_json::to_vec_pretty(r)?)
+}
+
+/// Recall a snapshot by its content-addressed hash id (blake3 hex).
+pub fn recall_snapshot(snapshot_id: &str) -> Result<MemoryState> {
+    let node_filename = if let Some(idx) = read_hash_index(snapshot_id)? {
+        idx.node
+    } else {
+        // Fallback: linear scan for robustness in early states
+        let dir = dag_nodes_dir()?;
+        let mut found: Option<String> = None;
+        for e in fs::read_dir(&dir)? {
+            let path = e?.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let bytes = fs::read(&path)?;
+            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                if v.get("hash").and_then(|x| x.as_str()) == Some(snapshot_id) {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        found = Some(name.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        found.ok_or_else(|| anyhow!("snapshot not found: {}", snapshot_id))?
+    };
+
+    let v = load_node(&node_filename)?;
+    let content = v.get("content").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    // Merge top-level lobe/key/ts/id/hash with nested meta for convenient replay
+    let mut meta_map = serde_json::Map::new();
+    if let Some(m) = v.get("meta").and_then(|m| m.as_object()) {
+        for (k, vv) in m.iter() { meta_map.insert(k.clone(), vv.clone()); }
+    }
+    for k in ["lobe", "key", "ts", "id", "hash"] {
+        if let Some(val) = v.get(k) { meta_map.insert(k.to_string(), val.clone()); }
+    }
+    Ok(MemoryState { content, meta: Value::Object(meta_map) })
+}
+
+/// Create or reset a named path to diverge from a specific snapshot.
+/// Returns the `path_id` (sanitized name).
+pub fn diverge_from(snapshot_id: &str, path_name: &str) -> Result<String> {
+    // Resolve snapshot to node filename (use index; fallback to scan like recall)
+    let node_filename = if let Some(idx) = read_hash_index(snapshot_id)? { idx.node } else {
+        // Fallback: linear scan for robustness if index is missing
+        let dir = dag_nodes_dir()?;
+        let mut found: Option<String> = None;
+        for e in fs::read_dir(&dir)? {
+            let path = e?.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let bytes = fs::read(&path)?;
+            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                if v.get("hash").and_then(|x| x.as_str()) == Some(snapshot_id) {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        found = Some(name.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        found.ok_or_else(|| anyhow!("snapshot not found: {}", snapshot_id))?
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let r = PathRef {
+        name: path_name.to_string(),
+        base_snapshot: snapshot_id.to_string(),
+        base_node: node_filename.clone(),
+        head_node: node_filename,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    write_path_ref(path_name, &r)?;
+    Ok(path_id_from_name(path_name))
+}
+
+/// Append a new immutable snapshot to a named path and advance its head.
+/// Returns the new content-addressed snapshot id (blake3 hex).
+pub fn extend_path(path_name: &str, state: MemoryState) -> Result<String> {
+    let mut r = read_path_ref(path_name)?.ok_or_else(|| anyhow!("path not found: {}", path_name))?;
+
+    // Ensure meta has sensible lobe/key for replay isolation
+    let mut meta = match state.meta {
+        Value::Object(m) => Value::Object(m),
+        _ => Value::Object(serde_json::Map::new()),
+    };
+    let lobe = meta.get("lobe").and_then(|v| v.as_str()).unwrap_or("replay").to_string();
+    if meta.get("lobe").is_none() { meta.as_object_mut().unwrap().insert("lobe".into(), Value::String("replay".into())); }
+    let key_default = path_id_from_name(path_name);
+    let key = meta.get("key").and_then(|v| v.as_str()).unwrap_or(&key_default).to_string();
+    if meta.get("key").is_none() { meta.as_object_mut().unwrap().insert("key".into(), Value::String(key_default.clone())); }
+
+    // Timestamps
+    let now = chrono::Utc::now().to_rfc3339();
+    if meta.get("created_at").is_none() { meta.as_object_mut().unwrap().insert("created_at".into(), Value::String(now.clone())); }
+    meta.as_object_mut().unwrap().insert("updated_at".into(), Value::String(now.clone()));
+
+    // Content-addressed id
+    let new_hash = blake3::hash(state.content.as_bytes()).to_hex().to_string();
+    meta.as_object_mut().unwrap().insert("cid".into(), Value::String(new_hash.clone()));
+
+    // Write new node, explicitly parented to current head
+    let _node_file = save_node(&new_hash, &state.content, &meta, &[r.head_node.clone()])?;
+
+    // Update path head and write back
+    let latest_idx = read_hash_index(&new_hash)?.ok_or_else(|| anyhow!("hash index missing for new node"))?;
+    r.head_node = latest_idx.node;
+    r.updated_at = now;
+    write_path_ref(path_name, &r)?;
+
+    Ok(new_hash)
+}
+
+// ---------- Public helpers for paths (heads, base, ancestry) ----------
+
+/// Return true if a path ref exists.
+pub fn path_exists(path_name: &str) -> Result<bool> {
+    Ok(read_path_ref(path_name)?.is_some())
+}
+
+/// Return the current head snapshot hash for a named path, if any.
+pub fn path_head_hash(path_name: &str) -> Result<Option<String>> {
+    if let Some(r) = read_path_ref(path_name)? {
+        if r.head_node.is_empty() { return Ok(None); }
+        let v = load_node(&r.head_node)?;
+        let h = v.get("hash").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if h.is_empty() { Ok(None) } else { Ok(Some(h)) }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Return the base snapshot hash recorded for a named path, if present.
+pub fn path_base_snapshot(path_name: &str) -> Result<Option<String>> {
+    if let Some(r) = read_path_ref(path_name)? {
+        if r.base_snapshot.is_empty() { Ok(None) } else { Ok(Some(r.base_snapshot)) }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Update a path's head to point at an existing snapshot by its content hash.
+/// Fails if the hash is unknown.
+pub fn set_path_head(path_name: &str, snapshot_hash: &str) -> Result<()> {
+    let idx = read_hash_index(snapshot_hash)?.ok_or_else(|| anyhow!("snapshot not found: {}", snapshot_hash))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let r = if let Some(mut existing) = read_path_ref(path_name)? {
+        existing.head_node = idx.node;
+        existing.updated_at = now.clone();
+        existing
+    } else {
+        // Create a new path ref seeded at this snapshot
+        PathRef {
+            name: path_name.to_string(),
+            base_snapshot: snapshot_hash.to_string(),
+            base_node: idx.node.clone(),
+            head_node: idx.node,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    };
+    write_path_ref(path_name, &r)
+}
+
+/// Return true if `ancestor_hash` is on the ancestor chain of `descendant_hash` (or equal).
+pub fn is_ancestor(ancestor_hash: &str, descendant_hash: &str) -> Result<bool> {
+    if ancestor_hash == descendant_hash { return Ok(true); }
+    // Resolve descendant to filename
+    let mut cur = if let Some(idx) = read_hash_index(descendant_hash)? {
+        Some(idx.node)
+    } else { None };
+    while let Some(fname) = cur {
+        let node = load_node(&fname)?;
+        if node.get("hash").and_then(|x| x.as_str()) == Some(ancestor_hash) {
+            return Ok(true);
+        }
+        let parent = node.get("parent").and_then(|x| x.as_str());
+        cur = if let Some(p) = parent {
+            if p.is_empty() { None }
+            else if p.ends_with(".json") { Some(p.to_string()) }
+            else if let Some(idx) = read_hash_index(p)? { Some(idx.node) } else { None }
+        } else { None };
+    }
+    Ok(false)
+}
+
 /// Return the child (next) nodes of a given node *within the same stream* by scanning.
 // MVP: linear scan; fine for small graphs.
 pub fn children_of(filename: &str) -> Result<Vec<String>> {
@@ -245,6 +541,107 @@ pub struct PruneReport {
     pub examined: usize,
     pub kept: usize,
     pub removed: usize,
+}
+
+// ---------- Snapshot metadata, citations, and path tracing ----------
+
+/// Return the `meta` object for a snapshot by its content hash id.
+pub fn snapshot_meta(snapshot_id: &str) -> Result<Value> {
+    let node_filename = if let Some(idx) = read_hash_index(snapshot_id)? {
+        idx.node
+    } else {
+        return Err(anyhow!("snapshot not found: {}", snapshot_id));
+    };
+    let v = load_node(&node_filename)?;
+    Ok(v.get("meta").cloned().unwrap_or(Value::Object(serde_json::Map::new())))
+}
+
+/// Flatten and return any provenance.sources listed in the snapshot meta; de-duplicates basic tuples.
+pub fn cite_sources(snapshot_id: &str) -> Result<Vec<Value>> {
+    let meta = snapshot_meta(snapshot_id)?;
+    let mut out: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(arr) = meta
+        .get("provenance")
+        .and_then(|p| p.get("sources"))
+        .and_then(|s| s.as_array())
+    {
+        for s in arr {
+            let k = serde_json::json!({
+                "kind": s.get("kind"),
+                "uri": s.get("uri"),
+                "cid": s.get("cid"),
+                "range": s.get("range"),
+            })
+            .to_string();
+            if seen.insert(k) {
+                out.push(s.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Trace a named path from head backwards following parent pointers; newest -> oldest up to `limit`.
+/// Returns a vector of lightweight objects with id/hash/ts/lobe/key and source counts.
+pub fn trace_path(path_name: &str, limit: usize) -> Result<Vec<Value>> {
+    let r = read_path_ref(path_name)?.ok_or_else(|| anyhow!("path not found: {}", path_name))?;
+    let mut cur = Some(r.head_node);
+    let mut out: Vec<Value> = Vec::new();
+    let mut n = 0usize;
+    while let Some(fname) = cur {
+        if n >= limit { break; }
+        let node = load_node(&fname)?;
+        let meta = node.get("meta").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+        let prov_count = meta
+            .get("provenance")
+            .and_then(|p| p.get("sources"))
+            .and_then(|s| s.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let item = serde_json::json!({
+            "filename": fname,
+            "id": node.get("id").and_then(|x| x.as_str()).unwrap_or_default(),
+            "hash": node.get("hash").and_then(|x| x.as_str()).unwrap_or_default(),
+            "ts": node.get("ts").and_then(|x| x.as_str()).unwrap_or_default(),
+            "lobe": node.get("lobe").and_then(|x| x.as_str()).unwrap_or_default(),
+            "key": node.get("key").and_then(|x| x.as_str()).unwrap_or_default(),
+            "provenance_sources": prov_count,
+        });
+        out.push(item);
+        // Parent may be stored as a node filename or as a content hash. Support both formats.
+        let parent_field = node.get("parent").and_then(|x| x.as_str());
+        let next_parent: Option<String> = if let Some(p) = parent_field {
+            if p.is_empty() {
+                None
+            } else if p.ends_with(".json") {
+                Some(p.to_string())
+            } else {
+                // Treat as content hash; resolve via index, then fallback to a scan
+                if let Some(idx) = read_hash_index(p)? { Some(idx.node) } else {
+                    let dir = dag_nodes_dir()?;
+                    let mut found: Option<String> = None;
+                    for e in fs::read_dir(&dir)? {
+                        let path = e?.path();
+                        if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+                        let bytes = fs::read(&path)?;
+                        if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                            if v.get("hash").and_then(|x| x.as_str()) == Some(p) {
+                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                    found = Some(name.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    found
+                }
+            }
+        } else { None };
+        cur = next_parent;
+        n += 1;
+    }
+    Ok(out)
 }
 
 /// Keep only the newest `keep_last_per_stream` nodes per (lobe,key).

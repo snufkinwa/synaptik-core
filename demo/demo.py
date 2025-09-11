@@ -26,14 +26,24 @@ from ui import print_assistant
 from flows import run_demo_flow
 from intents import (
     handle_action_plan,
+    handle_audit_trail,
+    handle_branch_hop,
+    handle_branch_steps,
     handle_recall_sources_query,
     handle_recent_query,
     handle_root_query,
+    handle_trace_path_cmd,
+    handle_recall_latest_path,
     handle_source_test,
     looks_like_action_plan,
+    looks_like_audit_trail,
+    looks_like_branch_hop,
+    looks_like_branch_steps,
     looks_like_recall_sources_query,
     looks_like_recent_query,
     looks_like_root_query,
+    looks_like_trace_path_cmd,
+    looks_like_recall_latest_path,
     looks_like_source_test,
 )
 from llm_client import MODEL, chat
@@ -58,6 +68,7 @@ def choose_temperature(user_text: str) -> float:
         return 0.65
     # Default uses baseline inside llm_client
     return 0.5
+
 
 
 def run_repl() -> None:
@@ -191,6 +202,18 @@ def run_repl() -> None:
                         "Do not label your reply as an example."
                     )
                 })
+                # Special-case: benign idioms like "this is killing me" / tech usage of kill
+                idiom_flags = {"clarify_nonliteral_intent", "acknowledge_frustration", "do_not_refuse"}
+                tech_flags = {"avoid_encouraging_destruction"}
+                if (set(constraints) & idiom_flags) or (set(constraints) & tech_flags):
+                    convo.append({
+                        "role": "system",
+                        "content": (
+                            "Treat any 'kill/killing' phrasing here as benign idiom or technical slang (e.g., kill the bug/process). "
+                            "Do not provide crisis or self-harm intervention content. "
+                            "Respond with empathetic but practical developer help: clarify the issue briefly, and offer step-by-step debugging/IDE tips."
+                        )
+                    })
                 llm_temp_hint = 0.35
             # If blocked, do not call the LLM. Use strict refusal template.
             if decision == "block":
@@ -209,11 +232,48 @@ def run_repl() -> None:
                 print(f"❌ Recent fetch error: {e}")
             continue
 
+        # Branch/replay helpers by plain language (no JSON)
+        if looks_like_branch_hop(user):
+            try:
+                handle_branch_hop(mem, user)
+            except Exception as e:
+                print(f"❌ Branch hop error: {e}")
+            continue
+
+        if looks_like_branch_steps(user):
+            try:
+                handle_branch_steps(mem, user)
+            except Exception as e:
+                print(f"❌ Branch steps error: {e}")
+            continue
+
+        if looks_like_recall_latest_path(user):
+            try:
+                handle_recall_latest_path(mem, user)
+            except Exception as e:
+                print(f"❌ Recall-latest error: {e}")
+            continue
+
+        if looks_like_trace_path_cmd(user):
+            try:
+                handle_trace_path_cmd(mem, user)
+            except Exception as e:
+                print(f"❌ Trace-path error: {e}")
+            continue
+
         if looks_like_source_test(user):
             try:
                 handle_source_test(mem, user)
             except Exception as e:
                 print(f"❌ Source test error: {e}")
+            continue
+
+        # Audit trail request — handled locally (no LLM)
+        if looks_like_audit_trail(user):
+            try:
+                handle_audit_trail(mem)
+            except Exception as e:
+                print(f"❌ Audit trail error: {e}")
             continue
 
         # If the user asks for a personalized action plan, prepare context then fall through to LLM

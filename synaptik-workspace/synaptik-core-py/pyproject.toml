@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "synaptik-core-beta"
-version = "0.1.1"
+version = "0.1.2"
 requires-python = ">=3.8"
 description = "Synaptik Core Python bindings (hackathon build)"
 readme = { file = "README.md", content-type = "text/markdown" }

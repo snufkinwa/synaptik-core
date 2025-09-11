@@ -1,13 +1,14 @@
 // src/commands/mod.rs
 use anyhow::{anyhow, Result};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::services::archivist::Archivist;
 use crate::services::audit::{lock_contracts, record_action, unlock_contracts};
 use crate::services::ethos::{decision_gate, precheck, Decision};
 use crate::services::librarian::Librarian;
 use crate::services::memory::Memory;
+use crate::memory::dag::MemoryState as DagMemoryState;
 
 use crate::commands::init::ensure_initialized_once;
 use crate::commands::{bytes_to_string_owned, HitSource, Prefer, RecallResult};
@@ -28,6 +29,33 @@ pub struct EthosReport {
 }
 
 impl Commands {
+    // -------------------- Path/name helpers --------------------
+
+    fn normalize_path_name(&self, name: &str) -> String {
+        let mut s = name.to_lowercase();
+        s.retain(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if s.is_empty() { "path".to_string() } else { s }
+    }
+
+    /// Get newest snapshot hash on a named path.
+    pub fn dag_head(&self, path_name: &str) -> Result<Option<String>> {
+        crate::memory::dag::path_head_hash(path_name)
+    }
+
+    /// Update a named path head to a specific snapshot hash.
+    pub fn update_path_head(&self, path_name: &str, snapshot_hash: &str) -> Result<()> {
+        let r = crate::memory::dag::set_path_head(path_name, snapshot_hash);
+        if r.is_ok() {
+            record_action(
+                "commands",
+                "update_path_head",
+                &json!({ "path": path_name, "hash": snapshot_hash }),
+                "low",
+            );
+        }
+        r
+    }
+
     // Keep the signature for now; ignore the args. Prefix with _ to silence warnings.
     pub fn new(_db_path: &str, _archivist: Option<Archivist>) -> Result<Self> {
         let report = ensure_initialized_once()?;
@@ -283,6 +311,256 @@ impl Commands {
         })
     }
 
+    // ---------------------------------------------------------------------
+    // Replay (Rewind & Diverge) helpers exposed via Commands
+    // ---------------------------------------------------------------------
+
+    /// Recall an immutable snapshot by content-addressed id (blake3 hex).
+    pub fn replay_recall_snapshot(&self, snapshot_id: &str) -> Result<DagMemoryState> {
+        // Read-only; no audit log to reduce noise.
+        self.memory.recall_snapshot(snapshot_id)
+    }
+
+    /// Create or reset a named path diverging from the given snapshot. Returns path_id.
+    pub fn replay_diverge_from(&self, snapshot_id: &str, path_name: &str) -> Result<String> {
+        let id = self.memory.diverge_from(snapshot_id, path_name)?;
+        record_action(
+            "commands",
+            "replay_diverge_from",
+            &json!({
+                "snapshot_id": snapshot_id,
+                "path_name": path_name,
+                "path_id": id
+            }),
+            "low",
+        );
+        Ok(id)
+    }
+
+    /// Append a new immutable snapshot to a named path and advance its head. Returns new hash.
+    pub fn replay_extend_path(&self, path_name: &str, state: DagMemoryState) -> Result<String> {
+        let new_id = self.memory.extend_path(path_name, state)?;
+        record_action(
+            "commands",
+            "replay_extend_path",
+            &json!({
+                "path_name": path_name,
+                "new_hash": new_id
+            }),
+            "low",
+        );
+        Ok(new_id)
+    }
+
+    // ---------------------------------------------------------------------
+    // High-level branch/append/consolidate APIs (idempotent, ethos-gated)
+    // ---------------------------------------------------------------------
+
+    /// Fork from a base path into a new exploratory branch.
+    /// Neuroscience: sprout a dendritic branch from the soma (`base_path`).
+    /// Returns the base snapshot CID used for the fork.
+    pub fn sprout_dendrite(&self, base_path: &str, new_path: &str) -> Result<String> {
+        // Resolve base: prefer head of base_path, otherwise seed from default lobe.
+        let base = self
+            .dag_head(base_path)?
+            .or_else(|| self.replay_base_from_lobe("chat").ok().flatten())
+            .ok_or(anyhow!("no base available for sprout_dendrite"))?;
+
+        let base_norm = self.normalize_path_name(base_path);
+        let new_norm = self.normalize_path_name(new_path);
+
+        // Ensure base path exists; idempotent.
+        if !crate::memory::dag::path_exists(&base_norm)? {
+            let _ = self.replay_diverge_from(&base, &base_norm)?;
+        }
+        // Create or reset new path at same base; idempotent.
+        let _ = self.replay_diverge_from(&base, &new_norm)?;
+        Ok(base)
+    }
+
+    /// Fast-forward the target path to the source head.
+    /// Neuroscience: systems consolidation (stabilize the trace into 'cortex'/`dst_path`).
+    pub fn systems_consolidate(&self, src_path: &str, dst_path: &str) -> Result<String> {
+        let src_head = self.dag_head(src_path)?.ok_or(anyhow!("no src head"))?;
+        // If dst missing or behind: repoint head to src (FF). If already equal: noop.
+        if let Some(dst_head) = self.dag_head(dst_path)? {
+            if dst_head == src_head {
+                return Ok(src_head);
+            }
+            // Only fast-forward when ancestor; otherwise caller should request merge.
+            if crate::memory::dag::is_ancestor(&dst_head, &src_head)? {
+                self.update_path_head(dst_path, &src_head)?;
+            } else {
+                return Err(anyhow!("non-fast-forward: dst is not ancestor of src"));
+            }
+        } else {
+            // Create path at src head
+            self.update_path_head(dst_path, &src_head)?;
+        }
+        Ok(src_head)
+    }
+
+    /// Create a merge snapshot with parents [main_head, feature_head] and move main to it.
+    /// Neuroscience: reconsolidation—integrate multiple traces into one memory.
+    /// Note: DAG presently supports single-parent. Until merge nodes are supported, this returns an error
+    /// when a fast-forward is not possible.
+    pub fn reconsolidate_paths(&self, main_path: &str, feature_path: &str, _note: &str) -> Result<String> {
+        let main_head = self.dag_head(main_path)?.ok_or(anyhow!("no main head"))?;
+        let feat_head = self.dag_head(feature_path)?.ok_or(anyhow!("no feature head"))?;
+        if main_head == feat_head {
+            return Ok(main_head);
+        }
+        if crate::memory::dag::is_ancestor(&main_head, &feat_head)? {
+            self.update_path_head(main_path, &feat_head)?;
+            return Ok(feat_head);
+        }
+        Err(anyhow!("merge commits not yet supported; non-FF reconsolidation blocked"))
+    }
+
+    /// Idempotent, normalized: create a branch at a resolved base.
+    /// base may be a snapshot hash or a path name; if None, lobe or 'main' are used.
+    pub fn branch(&self, path: &str, base: Option<&str>, lobe: Option<&str>) -> Result<String> {
+        let path_norm = self.normalize_path_name(path);
+        // If path exists already, return its recorded base snapshot id.
+        if crate::memory::dag::path_exists(&path_norm)? {
+            if let Some(b) = crate::memory::dag::path_base_snapshot(&path_norm)? {
+                return Ok(b);
+            }
+        }
+
+        // Resolve base: explicit hash or path, or by lobe/main fallback.
+        let resolved_base = if let Some(b) = base {
+            let b_norm = self.normalize_path_name(b);
+            // treat as path name if a path exists; else assume it's a cid
+            if crate::memory::dag::path_exists(&b_norm)? {
+                self.dag_head(&b_norm)?
+            } else {
+                Some(b.to_string())
+            }
+        } else if let Some(l) = lobe {
+            self.replay_base_from_lobe(l)?
+        } else if let Some(h) = self.dag_head("main")? {
+            Some(h)
+        } else {
+            self.replay_base_from_lobe("chat")?
+        }
+        .ok_or(anyhow!("no base available to branch from"))?;
+
+        let _ = self.replay_diverge_from(&resolved_base, &path_norm)?;
+        record_action(
+            "commands",
+            "branch_created",
+            &json!({ "path": path_norm, "base": resolved_base }),
+            "low",
+        );
+        Ok(resolved_base)
+    }
+
+    /// Append content to a named path with provenance and ethos gating.
+    pub fn append(&self, path: &str, content: &str, meta: Option<Value>) -> Result<String> {
+        let path_norm = self.normalize_path_name(path);
+        if !crate::memory::dag::path_exists(&path_norm)? {
+            return Err(anyhow!(format!("path '{}' not found; call branch() first", path_norm)));
+        }
+
+        // Ethos gate
+        let v = precheck(content, "replay_append").map_err(|e| anyhow!("ethos precheck error: {e}"))?;
+        match decision_gate(&v) {
+            Decision::Block => return Err(anyhow!("blocked by ethics: {}", v.reason)),
+            Decision::AllowWithConstraints => {
+                record_action(
+                    "commands", "append_constraints",
+                    &json!({"path": path_norm, "constraints": v.constraints, "risk": v.risk}),
+                    "medium",
+                );
+            }
+            Decision::Allow => {}
+        }
+
+        let parent = self.dag_head(&path_norm)?;
+        let base = crate::memory::dag::path_base_snapshot(&path_norm)?;
+        let enrich = json!({
+            "op": "append",
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "actor": "core",
+            "path": path_norm,
+            "parents": parent.clone().into_iter().collect::<Vec<_>>() ,
+            "base": base,
+            "content_hash": blake3::hash(content.as_bytes()).to_hex().to_string(),
+        });
+        let merged_meta = match meta.unwrap_or_else(|| json!({})) {
+            Value::Object(mut m) => {
+                if let Value::Object(e) = enrich { for (k, v) in e { m.insert(k, v); } }
+                Value::Object(m)
+            }
+            _ => enrich,
+        };
+        let state = DagMemoryState { content: content.to_string(), meta: merged_meta };
+        let id = self.replay_extend_path(&path_norm, state)?;
+        Ok(id)
+    }
+
+    /// Fast-forward if possible; else no-op with error until merges are supported.
+    pub fn consolidate(&self, src_path: &str, dst_path: &str) -> Result<String> {
+        self.systems_consolidate(src_path, dst_path)
+    }
+
+    /// Placeholder for future two-parent merge support. Errors today if non-FF.
+    pub fn merge(&self, src_path: &str, dst_path: &str, note: &str) -> Result<String> {
+        let _ = note; // reserved for future merge-commit message
+        self.reconsolidate_paths(dst_path, src_path, note)
+    }
+
+    // ------- Backward-compatible aliases -------
+
+    #[deprecated(note = "use sprout_dendrite()")]
+    pub fn begin_branch_from_path(&self, base_path: &str, new_path: &str) -> Result<String> {
+        self.sprout_dendrite(base_path, new_path)
+    }
+
+    #[deprecated(note = "use systems_consolidate()")]
+    pub fn promote_ff(&self, src_path: &str, dst_path: &str) -> Result<String> {
+        self.systems_consolidate(src_path, dst_path)
+    }
+
+    #[deprecated(note = "use reconsolidate_paths()")]
+    pub fn merge_paths(&self, main_path: &str, feature_path: &str, note: &str) -> Result<String> {
+        self.reconsolidate_paths(main_path, feature_path, note)
+    }
+
+    // ---------------------------------------------------------------------
+    // DAG metadata and citations
+    // ---------------------------------------------------------------------
+
+    /// Fetch the meta object for a snapshot (including provenance if present).
+    pub fn dag_snapshot_meta(&self, snapshot_id: &str) -> Result<serde_json::Value> {
+        // Read-only; no audit log.
+        crate::memory::dag::snapshot_meta(snapshot_id)
+    }
+
+    /// Trace a named path newest -> oldest up to limit.
+    pub fn dag_trace_path(&self, path_name: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+        // Read-only; no audit log.
+        crate::memory::dag::trace_path(path_name, limit)
+    }
+
+    /// Extract and de-dup provenance sources from a snapshot.
+    pub fn dag_cite_sources(&self, snapshot_id: &str) -> Result<Vec<serde_json::Value>> {
+        // Read-only; no audit log.
+        crate::memory::dag::cite_sources(snapshot_id)
+    }
+
+    /// Search DAG nodes by content words (case-insensitive), newest-first.
+    /// Returns a list of dicts: [{"hash", "id", "ts"}]
+    pub fn dag_search_content(&self, query: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let words: Vec<String> = query
+            .split_whitespace()
+            .filter(|w| !w.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        crate::memory::dag::search_content_words(&words, limit)
+    }
+
     /// Prune exact duplicates. If `lobe` is Some, prunes within that lobe; otherwise all lobes.
     pub fn prune_duplicates(&self, lobe: Option<&str>) -> Result<usize> {
         let total = if let Some(l) = lobe {
@@ -312,6 +590,47 @@ impl Commands {
             if total > 0 { "medium" } else { "low" },
         );
         Ok(total)
+    }
+
+    /// Resolve a replay base snapshot for a lobe by preferring the latest archived CID,
+    /// otherwise promoting the latest hot item in that lobe. Returns Some(cid) if available.
+    pub fn replay_base_from_lobe(&self, lobe: &str) -> Result<Option<String>> {
+        if let Some(cid) = self.memory.latest_archived_cid_in_lobe_public(lobe)? {
+            return Ok(Some(cid));
+        }
+        if let Some((_id, cid)) = self.memory.promote_latest_hot_in_lobe(lobe)? {
+            return Ok(Some(cid));
+        }
+        // No archived or hot rows exist for this lobe. Auto-seed a minimal base so
+        // replay flows can begin without requiring Python-side seeding.
+        //
+        // 1) Write a tiny seed row via Librarian (hot store)
+        let seed_key = Some("seed_base");
+        let seed_text = format!("Seed: auto-seeded base for lobe '{lobe}'");
+        let mem_id = self
+            .librarian
+            .ingest_text(&self.memory, lobe, seed_key, &seed_text)?;
+        record_action(
+            "commands",
+            "replay_seed_written",
+            &json!({ "lobe": lobe, "memory_id": mem_id }),
+            "low",
+        );
+
+        // 2) Promote that hot row into the DAG to obtain a CID
+        if let Some((id, cid)) = self.memory.promote_latest_hot_in_lobe(lobe)? {
+            // Also ensure cold archive object is created for parity
+            let _ = self.librarian.promote_to_archive(&self.memory, &id);
+            record_action(
+                "commands",
+                "replay_seed_promoted",
+                &json!({ "lobe": lobe, "memory_id": id, "cid": cid }),
+                "low",
+            );
+            return Ok(Some(cid));
+        }
+
+        Ok(None)
     }
 
     /// Force contract files to match embedded canon.
