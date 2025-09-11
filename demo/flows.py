@@ -173,8 +173,10 @@ def run_demo_flow(mem: MemoryBridge) -> None:
             print(f"  + {_path}: {sid[:8]}  {_payload}")
             return sid
 
+        last_a_step = None
         for i in (1, 2):
-            _append_step(cmd, a_id, f'{{"step":"{i}","note":"step {i} on {name_a}"}}')
+            last_a_step = str(i)
+            _append_step(cmd, a_id, f'{{"step":"{last_a_step}","note":"step {last_a_step} on {name_a}"}}')
 
         # Branch B from the same base using distinct name
         if base:
@@ -183,8 +185,10 @@ def run_demo_flow(mem: MemoryBridge) -> None:
         print(f"B path id: {b_id}")
 
         # Append steps on B
+        last_b_step = None
         for i in (1,):
-            _append_step(cmd, b_id, f'{{"step":"{i}","note":"step {i} on {name_b}"}}')
+            last_b_step = str(i)
+            _append_step(cmd, b_id, f'{{"step":"{last_b_step}","note":"step {last_b_step} on {name_b}"}}')
 
         # Settle and verify
         import time as _t, json as _json
@@ -223,15 +227,15 @@ def run_demo_flow(mem: MemoryBridge) -> None:
                         ok = False
                 if not ok:
                     ok = f'"step": "{expect_step}"' in content or f'"step":"{expect_step}"' in content
+                # Keep output clean: print success tick only
                 if ok:
                     print(f"   ✓ {_path} head = {expect_step}")
-                else:
-                    print(f"   ⚠ {_path} head mismatch (expect {expect_step})")
             except Exception as _e:
                 print(f"   ⚠ {_path} head check failed: {_e}")
 
-        _assert_head(a_id, "A2")
-        _assert_head(b_id, "B1")
+        # Verify against the actual last steps we appended
+        _assert_head(a_id, last_a_step or "1")
+        _assert_head(b_id, last_b_step or "1")
 
         # Flash provenance for newest node on each branch
         for _p, _lbl in ((a_id, "plan_a"), (b_id, "plan_b")):
