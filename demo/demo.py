@@ -45,6 +45,7 @@ from intents import (
     looks_like_trace_path_cmd,
     looks_like_recall_latest_path,
     looks_like_source_test,
+    reset_branch_context,
 )
 from llm_client import MODEL, chat
 from actions import maybe_parse_action, route
@@ -58,6 +59,9 @@ CREATIVE_RE = re.compile(r"\b(plan|brainstorm|idea|ideas|design|rewrite|draft|st
 
 def choose_temperature(user_text: str) -> float:
     t = (user_text or "").lower()
+    # Lower for introductions to reduce variance on tool usage
+    if _extract_first_name(user_text):
+        return 0.25
     # Low temperature for factual queries or source/recent introspection
     if looks_like_source_test(t) or looks_like_recent_query(t):
         return 0.25
@@ -69,6 +73,38 @@ def choose_temperature(user_text: str) -> float:
     # Default uses baseline inside llm_client
     return 0.5
 
+
+# Lightweight helper to extract a likely first name from introductions
+_NAME_RES = [
+    re.compile(r"\bmy name is\s+([A-Z][a-zA-Z'\-]{1,30})\b", re.I),
+    re.compile(r"\bi am\s+([A-Z][a-zA-Z'\-]{1,30})\b", re.I),
+    re.compile(r"\bi'm\s+([A-Z][a-zA-Z'\-]{1,30})\b", re.I),
+    re.compile(r"\bcall me\s+([A-Z][a-zA-Z'\-]{1,30})\b", re.I),
+    re.compile(r"\bname\s*[:=]\s*([A-Z][a-zA-Z'\-]{1,30})\b", re.I),
+]
+
+
+def _extract_first_name(text: str) -> str | None:
+    t = text or ""
+    for rx in _NAME_RES:
+        m = rx.search(t)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _has_stored_name(mem: MemoryBridge) -> bool:
+    try:
+        ids = mem.recent("preferences", 5)
+        if not ids:
+            return False
+        recs = mem.recall_many(ids)
+        for r in recs:
+            if isinstance(r, dict) and (r.get("content") or "").strip().lower().startswith("name:"):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def run_repl() -> None:
@@ -140,7 +176,10 @@ def run_repl() -> None:
                         action_name = act.get("action", "unknown")
                         print(f"\n🔧 Action: {action_name}")
                         if result.get("ok"):
-                            print("✅ Success")
+                            if result.get("dedup"):
+                                print("ℹ️ Already saved")
+                            else:
+                                print("✅ Success")
                         else:
                             print(f"❌ Failed: {result.get('error', 'Unknown error')}")
                     convo.append({"role": "assistant", "content": assistant})
@@ -158,6 +197,7 @@ def run_repl() -> None:
         print("-" * 60)
         posted_chat_header = True
 
+    stored_user_name = False
     while True:
         try:
             user = input("\nYou> ").strip()
@@ -175,6 +215,12 @@ def run_repl() -> None:
                 run_demo_flow(mem)
             except Exception as e:
                 print(f"❌ Demo error: {e}")
+            finally:
+                # Ensure branch UI state doesn't leak into subsequent phases
+                try:
+                    reset_branch_context()
+                except Exception:
+                    pass
             continue
 
         # Run local precheck BEFORE hitting the LLM (ensures audit/ethics logs record)
@@ -197,7 +243,9 @@ def run_repl() -> None:
                         f"risk={risk}; reason={pre.get('reason','')}; "
                         f"constraints=[{cons_str}]. "
                         "Use the CONSTRAINTS TEMPLATE from your system instructions. Do not refuse; do not use the refusal template. "
+                        "Never encourage destructive or irreversible actions (e.g., 'destroy', 'wipe', 'nuke'); reframe to safe, reversible steps with backups and rollbacks. "
                         "If the user proposes ignoring safety to go faster, offer a safer plan that preserves safety while improving speed. "
+                        "Do not propose or append memory actions for destructive requests. "
                         "Reply directly with practical steps. Do not mention or describe constraints, policy, risk, or safety. "
                         "Do not label your reply as an example."
                     )
@@ -205,7 +253,9 @@ def run_repl() -> None:
                 # Special-case: benign idioms like "this is killing me" / tech usage of kill
                 idiom_flags = {"clarify_nonliteral_intent", "acknowledge_frustration", "do_not_refuse"}
                 tech_flags = {"avoid_encouraging_destruction"}
-                if (set(constraints) & idiom_flags) or (set(constraints) & tech_flags):
+                # Also add this guidance if the user text contains 'kill'/'killing' (benign idiom or tech slang).
+                user_lc = (user or "").lower()
+                if (set(constraints) & idiom_flags) or (set(constraints) & tech_flags) or ("kill" in user_lc or "killing" in user_lc):
                     convo.append({
                         "role": "system",
                         "content": (
@@ -223,6 +273,17 @@ def run_repl() -> None:
                 continue
         except Exception as e:
             print(f"⚠ Precheck error (continuing): {e}")
+
+        # Backstop: previously auto-stored names in greetings. Now skip fallback when detected
+        try:
+            if not stored_user_name and not _has_stored_name(mem):
+                first_name = _extract_first_name(user)
+                if first_name:
+                    # Skip fallback auto-store; allow the assistant to append remember action instead.
+                    stored_user_name = True
+        except Exception as e:
+            # Non-fatal — proceed to normal flow
+            print(f"⚠ Name-capture fallback failed: {e}")
 
         # Heuristic intent: "show recent memories" with sources — handle locally without LLM
         if looks_like_recent_query(user):
@@ -326,7 +387,10 @@ def run_repl() -> None:
                 action_name = act.get('action', 'unknown')
                 print(f"\n🔧 Action: {action_name}")
                 if result.get("ok"):
-                    print("✅ Success")
+                    if result.get("dedup"):
+                        print("ℹ️ Already saved")
+                    else:
+                        print("✅ Success")
                     if "memory_id" in result:
                         print(f"   💾 Stored as: {result['memory_id'][:30]}...")
                     if "reflection" in result and result["reflection"]:
@@ -357,6 +421,32 @@ def run_repl() -> None:
                         risk = pre.get("risk", "unknown")
                         icon = {"allow":"✅","allow_with_constraints":"⚠️","block":"🚫"}.get(decision,"❓")
                         print(f"   🛡️ Ethics: {icon} {decision.upper()} | Risk: {risk}")
+                    # Minimal visibility for branch content when branching
+                    if action_name == "branch_hop":
+                        try:
+                            base = result.get("base")
+                            if base:
+                                print(f"   🌱 Base snapshot: {str(base)[:18]}...")
+                            ba = result.get("branch_a") or {}
+                            if ba:
+                                bpath = ba.get("path") or ba.get("id")
+                                cids = ba.get("cids") or []
+                                print(f"   🌿 {bpath}: +{len(cids)} engrams")
+                                # Show a short newest→oldest timeline for context
+                                items = mem.cmd.trace_path(str(bpath), 5)
+                                if isinstance(items, list) and items:
+                                    print("     🧭 Timeline (newest→oldest):")
+                                    for it in items[:5]:
+                                        h = (it.get("hash") or "")[:12]
+                                        ts = it.get("ts") or ""
+                                        print(f"       • {ts}  {h}")
+                            bb = result.get("branch_b") or None
+                            if bb:
+                                bpath = bb.get("path") or bb.get("id")
+                                cids = bb.get("cids") or []
+                                print(f"   🌿 {bpath}: +{len(cids)} engrams")
+                        except Exception:
+                            pass
                 else:
                     print(f"❌ Failed: {result.get('error', 'Unknown error')}")
 

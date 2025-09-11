@@ -32,7 +32,74 @@ def route(action: Dict[str, Any], bridge: MemoryBridge) -> Dict[str, Any]:
     args = (action or {}).get("args", {}) or {}
 
     if name == "remember":
-        mid = bridge.remember(args.get("lobe", "chat"), args.get("content", ""), args.get("key"))
+        # Local safety interlock: do not persist destructive/irreversible intents.
+        content = args.get("content", "") or ""
+        lobe = args.get("lobe", "chat") or "chat"
+        key = args.get("key")
+
+        def _is_benign_tech_idiom(t: str) -> bool:
+            tl = (t or "").lower()
+            # Common benign contexts for "kill": processes, PIDs, signals, bugs
+            benign_markers = [
+                "kill -9", "sigkill", "pid", "process", "processes", "orphan", "zombie",
+                "bug", "test", "job", "thread", "service", "server",
+            ]
+            if "kill" in tl and any(m in tl for m in benign_markers):
+                return True
+            return False
+
+        def _looks_destructive(t: str) -> bool:
+            import re
+            tl = (t or "").lower()
+            # Flag irreversible/destructive intents aimed at broad targets
+            patterns = [
+                r"\bdestroy(\s+all|\s+the|\b)",
+                r"\bnuke\b",
+                r"\bwipe(\s+out|\s+the|\s+all|\b)",
+                r"\bdelete\s+(everything|all|the\s+code|the\s+repo|the\s+database)",
+                r"\berase\s+(everything|all)\b",
+                r"\brm\s+-rf\b",
+                r"\bformat\s+(disk|drive)\b",
+                r"\bkill\s+(all|everything|the\s+system|the\s+service|the\s+app)\b",
+            ]
+            if _is_benign_tech_idiom(t):
+                return False
+            return any(re.search(p, tl) for p in patterns)
+
+        try:
+            if _looks_destructive(content):
+                # Ensure it’s logged to the audit logbook via precheck, but do not store.
+                try:
+                    bridge.cmd.precheck_text(content, "memory_storage")
+                except Exception:
+                    # Ignore logging errors; proceed to block storage.
+                    pass
+                return {
+                    "ok": False,
+                    "error": "blocked_by_policy",
+                    "reason": "destructive_or_irreversible_intent_not_stored_logged_instead",
+                }
+        except Exception:
+            # On any guard error, fall back to the core precheck inside remember()
+            pass
+
+        # Lightweight de-dup for user_name in preferences to avoid double stores
+        try:
+            if (lobe == "preferences") and (
+                (isinstance(key, str) and key == "user_name") or (content.strip().lower().startswith("name:"))
+            ):
+                ids = bridge.recent("preferences", 10) or []
+                if ids:
+                    recs = bridge.recall_many(ids)
+                    for idx, r in enumerate(recs):
+                        if isinstance(r, dict) and (r.get("content") or "").strip().lower().startswith("name:"):
+                            existing_id = ids[idx]
+                            return {"ok": True, "memory_id": existing_id, "dedup": True}
+        except Exception:
+            # Non-fatal; proceed to write
+            pass
+
+        mid = bridge.remember(lobe, content, key)
         return {"ok": True, "memory_id": mid}
 
     if name == "reflect":
@@ -189,7 +256,6 @@ def route(action: Dict[str, Any], bridge: MemoryBridge) -> Dict[str, Any]:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    return {"ok": False, "error": f"unknown action: {name}"}
     if name == "branch_hop":
         import json, time
         cmd = bridge.cmd
@@ -250,8 +316,10 @@ def route(action: Dict[str, Any], bridge: MemoryBridge) -> Dict[str, Any]:
         res = {
             "ok": True,
             "base": base,
-            "branch_a": {"id": a_id, "steps": a_steps, "cids": a_cids},
+            "branch_a": {"id": a_id, "path": branch_a, "steps": a_steps, "cids": a_cids},
         }
         if b_id:
-            res["branch_b"] = {"id": b_id, "steps": b_steps, "cids": b_cids}
+            res["branch_b"] = {"id": b_id, "path": branch_b, "steps": b_steps, "cids": b_cids}
         return res
+
+    return {"ok": False, "error": f"unknown action: {name}"}

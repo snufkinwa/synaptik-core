@@ -20,3 +20,13 @@ apply = [
   "Offer staged rollout or checklist",
   "Log event to signals/ethics_tension"
 ]
+
+# Additional guardrails for destructive phrasing
+[constraints.when_destructive_language]
+apply = [
+  "Discourage destructive intent and irreversible actions",
+  "Reframe as safe migration with backups + rollbacks",
+  "Avoid words like 'destroy', 'nuke', 'wipe' in recommendations",
+  "Do not propose or store memory actions for destructive requests",
+  "Log event to signals/ethics_tension"
+]

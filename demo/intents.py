@@ -12,6 +12,16 @@ import json
 LAST_BRANCHES: Optional[tuple[str, str]] = None
 
 
+def reset_branch_context() -> None:
+    """Reset transient branch UI state used for plain-language 'both branches' requests.
+
+    This prevents a previous demo or branch-hop run from leaking into later phases,
+    ensuring that a new request creates fresh branches instead of appending to old ones.
+    """
+    global LAST_BRANCHES
+    LAST_BRANCHES = None
+
+
 
 def looks_like_recent_query(text: str) -> bool:
     t = (text or "").lower()
@@ -231,6 +241,7 @@ def handle_branch_hop(mem: MemoryBridge, user: str) -> None:
         names = [quoted[0]] + ([quoted[1]] if len(quoted) > 1 else [])
     elif planish:
         names = [planish[0]] + ([planish[1]] if len(planish) > 1 else [])
+    provided_names = bool(names)
     if len(names) >= 2:
         name_a, name_b = names[0], names[1]
     elif len(names) == 1:
@@ -268,6 +279,43 @@ def handle_branch_hop(mem: MemoryBridge, user: str) -> None:
     if base:
         print(f"Base snapshot: {base[:8]}…")
         cmd.recall_snapshot(base)
+    # Ensure branch names are unique so repeated runs don't append to an old branch
+    def _path_exists(label: str) -> bool:
+        try:
+            items = mem.cmd.trace_path(label, 1)
+            if isinstance(items, list) and items:
+                return True
+        except Exception:
+            pass
+        # Fallback: scan refs/paths for sanitized id
+        try:
+            root = mem.root()
+            import os
+            from .path_utils import _sanitize as _san  # type: ignore
+        except Exception:
+            root = ""
+            _san = lambda s: s  # type: ignore
+        try:
+            p = os.path.join(root, "refs", "paths", f"{_san(label)}.json")
+            return os.path.isfile(p)
+        except Exception:
+            return False
+
+    def _unique_name(label: str) -> str:
+        if not _path_exists(label):
+            return label
+        # Append a short unique token to avoid collision
+        try:
+            import secrets as _se
+            suffix = _se.token_hex(2)
+        except Exception:
+            suffix = "x1"
+        base_label = label.rstrip("-")
+        return f"{base_label}-{suffix}"
+
+    name_a = _unique_name(name_a)
+    name_b = _unique_name(name_b if name_b != name_a else name_b + "-b")
+
     a_id = cmd.recall_and_diverge(base, name_a)  # type: ignore[attr-defined]
     print(f"A path id: {a_id}")
 
@@ -309,7 +357,11 @@ def handle_branch_hop(mem: MemoryBridge, user: str) -> None:
     steps_a = _extract_steps(name_a)
     steps_b = _extract_steps(name_b)
 
-    for i in range(1, (len(steps_a) or a_steps) + 1):
+    # If user provided explicit branch names but no explicit step counts or descriptions,
+    # avoid auto-creating default steps to prevent duplicate numbering in follow-up commands.
+    a_default_ok = (len(steps_a) > 0) or bool(ma or mwa) or (not provided_names)
+    a_count = (len(steps_a) if len(steps_a) > 0 else (a_steps if a_default_ok else 0))
+    for i in range(1, a_count + 1):
         note = steps_a[i - 1] if i - 1 < len(steps_a) else f"step {i} on {name_a}"
         _append_step(a_id, {"step": f"{i}", "note": note})
 
@@ -318,7 +370,9 @@ def handle_branch_hop(mem: MemoryBridge, user: str) -> None:
         cmd.recall_snapshot(base)
     b_id = cmd.recall_and_diverge(base, name_b)  # type: ignore[attr-defined]
     print(f"B path id: {b_id}")
-    for i in range(1, (len(steps_b) or b_steps) + 1):
+    b_default_ok = (len(steps_b) > 0) or bool(mb or mwb) or (not provided_names)
+    b_count = (len(steps_b) if len(steps_b) > 0 else (b_steps if b_default_ok else 0))
+    for i in range(1, b_count + 1):
         note = steps_b[i - 1] if i - 1 < len(steps_b) else f"step {i} on {name_b}"
         _append_step(b_id, {"step": f"{i}", "note": note})
 
@@ -379,7 +433,8 @@ def handle_branch_hop(mem: MemoryBridge, user: str) -> None:
             print(line)
 
     if base:
-        _ascii_tree(base, [(a_id, "plan_a"), (b_id, "plan_b")], limit=10)
+        # Show actual branch labels instead of generic placeholders
+        _ascii_tree(base, [(a_id, name_a), (b_id, name_b)], limit=10)
     # Verify heads and show provenance for newest nodes
     def _assert_head(_path: str, expect_step: str) -> None:
         try:
@@ -409,16 +464,7 @@ def handle_branch_hop(mem: MemoryBridge, user: str) -> None:
     _assert_head(a_id, str(len(steps_a) or a_steps))
     _assert_head(b_id, str(len(steps_b) or b_steps))
 
-    for _p, _lbl in ((a_id, "plan_a"), (b_id, "plan_b")):
-        try:
-            items = safe_trace_path(cmd, cmd.root(), _p, 1) or []
-            head = items[0].get("hash") if items else None
-            if isinstance(head, str):
-                print_citations(cmd, head, _lbl)
-            else:
-                print(f"   🔗 Sources for {_lbl} @ ????????: []")
-        except Exception as _e:
-            print(f"   ⚠ Cite sources failed for {_lbl}: {_e}")
+    # Omit source printing here to keep the timeline focused and minimal
 
     # Optional: consolidate demo branches into main (fast-forward only), ignore failures
     try:
@@ -454,22 +500,45 @@ def handle_trace_path_cmd(mem: MemoryBridge, user: str) -> None:
         if not a or not b:
             print("   ⚠ Could not infer two branches. Try creating them via a branch hop first (e.g., 'explore branches fast-track and research-deep').")
             return
-        # Collect traces for both branches
+        # Resolve provided labels to engine path names (accept hyphens or sanitized IDs)
+        def _resolve_path_name(label: str) -> str:
+            name = label
+            try:
+                # Try direct
+                items = mem.cmd.trace_path(name, 1)
+                if isinstance(items, list):
+                    return name
+            except Exception:
+                pass
+            try:
+                # Try sanitized id
+                pid = _path_id(label)
+                items = mem.cmd.trace_path(pid, 1)
+                if isinstance(items, list):
+                    return pid
+            except Exception:
+                pass
+            return _path_id(label)
+
+        ra = _resolve_path_name(a)
+        rb = _resolve_path_name(b)
+
+        # Collect traces for both branches using resolved names
         traces: dict[str, list[dict]] = {}
         bases: dict[str, str] = {}
-        for label in (a, b):
+        for display, internal in ((a, ra), (b, rb)):
             try:
-                items = mem.cmd.trace_path(label, limit)
+                items = mem.cmd.trace_path(internal, limit)
                 if isinstance(items, list) and items:
-                    traces[label] = items
+                    traces[display] = items
                     base_hash_full = items[-1].get("hash") or ""
-                    bases[label] = str(base_hash_full)
+                    bases[display] = str(base_hash_full)
                 else:
-                    traces[label] = []
-                    bases[label] = ""
+                    traces[display] = []
+                    bases[display] = ""
             except Exception:
-                traces[label] = []
-                bases[label] = ""
+                traces[display] = []
+                bases[display] = ""
 
         base_a = bases.get(a, "")
         base_b = bases.get(b, "")
@@ -508,7 +577,8 @@ def handle_trace_path_cmd(mem: MemoryBridge, user: str) -> None:
                     continue
                 # Only include nodes that belong to this branch's key
                 key = (it.get("key") or "")
-                if not isinstance(key, str) or key.lower() != label_pid:
+                # Accept exact or suffixed key (e.g., fast_track vs fast_track_ab12)
+                if not isinstance(key, str) or not (key.lower() == label_pid or key.lower().startswith(label_pid + "_")):
                     continue
                 # Try to decode step token
                 token = ""
@@ -537,7 +607,8 @@ def handle_trace_path_cmd(mem: MemoryBridge, user: str) -> None:
             for (label, prefix), parts in zip(branch_labels, [pa, pb]):
                 line = prefix + f"{label}: " + (" ── ".join(parts) if parts else "<seed only>")
                 print(line)
-            print(f"\n🔗 Both paths diverged from base {base_short}")
+            # Explicit per-path mapping even when both share the same base
+            print(f"\n🔗 Bases: {a} ← {base_short}, {b} ← {base_short}")
         else:
             # Different bases; render two lines with their own bases
             pa = _parts_after_base(a, base_a) if base_a else []
@@ -867,6 +938,12 @@ def looks_like_action_plan(text: str) -> bool:
     ):
         return True
     if "personalized" in t and ("plan" in t or "next steps" in t):
+        return True
+    # Minimal extension: treat recommendation requests that ask to cite memory IDs like an action plan
+    if ("which branch" in t or "recommend" in t) and (
+        ("reference" in t and ("memory id" in t or "memory ids" in t))
+        or ("cite" in t and ("memory id" in t or "ids" in t))
+    ):
         return True
     return False
 

@@ -32,10 +32,10 @@ Prompt:
 On the fast-track branch: Step 1 - Implement prompt-level bias mitigation with pre-trained bias detection. Step 2 - Use gradient checkpointing to reduce memory usage within our 100 GPU hour budget.
 
 
- Phase 2.7: Research-Deep Path Development
+ Phase 2.7: Research-Heavy Path Development
 Prompt:
 
-On the research-deep branch: Step 1 - Conduct systematic attention pattern analysis to identify bias sources. Step 2 - Design custom regularization based on findings. Step 3 - Create controlled experimental setup for validation.
+On the research-heavy branch: Step 1 - Conduct systematic attention pattern analysis to identify bias sources. Step 2 - Design custom regularization based on findings. Step 3 - Create controlled experimental setup for validation.
 
 
  Phase 2.8: Path Comparison & Analysis
@@ -47,13 +47,13 @@ Show me the visual timeline for both branches. Which path diverged from which ba
  Phase 2.9: Trace Lineage
 Prompt:
 
-Trace the fast-track path newest to oldest, then trace the research-deep path. I want to see the decision ancestry.
+Trace the fast-track path newest to oldest, then trace the research-heavy path. I want to see the decision ancestry.
 
 
  Phase 2.10: Branch Content Recall
 Prompt:
 
-Recall the latest snapshot from the fast-track branch, then the latest from research-deep. What are the concrete next steps in each path?
+Recall the latest snapshot from the fast-track branch, then the latest from research-heavy. What are the concrete next steps in each path?
 
 
  Phase 2.11: Decision Support

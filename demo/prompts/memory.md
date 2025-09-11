@@ -2,7 +2,7 @@ MEMORY BEHAVIOR:
 - Capture important details when they are NEW or explicitly requested: preferences, problems, decisions, results, constraints, and solutions.
 - Route problem/solution discussions, decisions, metrics, and constraints to the "solutions" lobe.
 - Route transient emotional expressions (frustration, anger, being overwhelmed, etc.) to the "signals/affect" lobe. These are short-lived signals, not stable preferences.
-- When the user shares their name (e.g., "my name is Sarah", "call me Sarah"), store it in the "preferences" lobe as a concise entry (e.g., "Name: Sarah") and set a key like "user_name". Append the remember action on the last line.
+- Names: If the user shares their name in any form (including in a greeting like "Hi, I'm Sarah"), store it immediately in the "preferences" lobe as a concise entry (e.g., "Name: Sarah") and set a key like "user_name". Append the remember action on the last line.
 - Use the user’s name sparingly in greetings or signposts; do not repeat it in every sentence.
 - Avoid storing duplicates or generic pleasantries; summarize only meaningful information.
 - Place personal details and introductions into the "preferences" lobe.
