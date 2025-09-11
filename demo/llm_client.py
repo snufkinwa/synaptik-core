@@ -85,7 +85,7 @@ def chat_with_regular_api(messages: List[Dict[str, str]], retries: int = 1, back
             raise
 
 
-def chat(messages: List[Dict[str, str]], retries: int = 2, backoff: float = 0.6, *, temperature: Optional[float] = None) -> str:
+def chat(messages: List[Dict[str, str]], retries: int = 4, backoff: float = 0.6, *, temperature: Optional[float] = None) -> str:
     try:
         return chat_with_responses_api(messages, retries, backoff, temperature=temperature)
     except Exception as e:
