@@ -16,7 +16,7 @@ Tips:
 import sys
 from pathlib import Path
 import re  # drop if unused
-from typing import Dict, List  # drop if unused
+from typing import Dict, List, Optional  # drop if unused
 
 # Add this file's directory to sys.path (script mode only)
 sys.path.append(str(Path(__file__).resolve().parent))
@@ -84,7 +84,7 @@ _NAME_RES = [
 ]
 
 
-def _extract_first_name(text: str) -> str | None:
+def _extract_first_name(text: str) -> Optional[str]:
     t = text or ""
     for rx in _NAME_RES:
         m = rx.search(t)
