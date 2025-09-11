@@ -9,7 +9,7 @@ Usage:
 Tips:
   - Type `:demo` to run a quick scripted end-to-end flow.
   - To replicate the demo video, open `demo/test_prompts_syn.txt` and paste
-    the prompts phase-by-phase (Phase 1 → 13) into the REPL.
+    the prompts phase-by-phase (Phase 1 → 16) into the REPL.
 """
 
 # Standard library
@@ -119,7 +119,7 @@ def run_repl() -> None:
     print("   • Check ethics before storing sensitive content")
     print("   • Reference previous conversations using Memory IDs")
     print("\nType ':demo' anytime to run a quick end-to-end demo.")
-    print("Tip: To replicate the demo video, paste prompts from demo/test_prompts_syn.txt (Phase 1 → 13).")
+    print("Tip: To replicate the demo video, paste prompts from demo/test_prompts_syn.txt (Phase 1 → 16).")
     print("=" * 60)
     # Track whether we've printed the chat area header yet
     posted_chat_header = False

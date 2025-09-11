@@ -94,7 +94,7 @@ To reproduce the exact flow shown in the demo video, run `:demo`. Then open and 
 
 - `demo/test_prompts_syn.txt`
 
-Paste them phase-by-phase (Phase 1 → Phase 13) into the REPL after running `python -m demo.demo`. This will exercise:
+Paste them phase-by-phase (Phase 1 → Phase 16) into the REPL after running `python -m demo.demo`. This will exercise:
 
 - Persistent notes and preferences in the `preferences` lobe
 - Promotion into archive and DAG with recall previews and sources
