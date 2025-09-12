@@ -135,7 +135,7 @@ Let's rewind to the point where I mentioned my 100 GPU hour constraint. Create a
  Phase 15: Cross-Branch Analysis
 Prompt:
 
-Compare all three solution branches (fast-track, research-deep, unlimited-compute). Show me the decision tree and explain how the computational constraint shaped the solution space.
+Compare all three solution branches (fast-track, research-heavy, unlimited-compute). Show me the decision tree and explain how the computational constraint shaped the solution space.
 
 
 Phase 16: Audit Trail Demonstration  
