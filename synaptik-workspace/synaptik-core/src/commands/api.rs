@@ -511,22 +511,7 @@ impl Commands {
         self.reconsolidate_paths(dst_path, src_path, note)
     }
 
-    // ------- Backward-compatible aliases -------
-
-    #[deprecated(note = "use sprout_dendrite()")]
-    pub fn begin_branch_from_path(&self, base_path: &str, new_path: &str) -> Result<String> {
-        self.sprout_dendrite(base_path, new_path)
-    }
-
-    #[deprecated(note = "use systems_consolidate()")]
-    pub fn promote_ff(&self, src_path: &str, dst_path: &str) -> Result<String> {
-        self.systems_consolidate(src_path, dst_path)
-    }
-
-    #[deprecated(note = "use reconsolidate_paths()")]
-    pub fn merge_paths(&self, main_path: &str, feature_path: &str, note: &str) -> Result<String> {
-        self.reconsolidate_paths(main_path, feature_path, note)
-    }
+    // (Removed deprecated backward-compatible aliases)
 
     // ---------------------------------------------------------------------
     // DAG metadata and citations
