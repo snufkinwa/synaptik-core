@@ -226,12 +226,46 @@ impl PonsStore {
     }
 
     /// List the latest version for keys under a pons, returning at most `limit` refs.
+    ///
+    /// Deterministic and scalable(ish): traverses the directory tree in lexicographic
+    /// order so results are stable between runs and short-circuits when `limit` is reached.
+    /// This delegates to `list_latest_page` with no cursor.
     pub fn list_latest(
         &self,
         pons: &str,
         prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ObjectRef>> {
+        self.list_latest_page(pons, prefix, None, limit)
+    }
+
+    /// Deterministic, paginated listing of latest object refs for keys under a `pons`.
+    ///
+    /// - Traversal is lexicographically ordered by key path to ensure stable output.
+    /// - `prefix` filters by normalized key prefix.
+    /// - Cursor format (`start_after`): expects a normalized key path (same normalization
+    ///   as `prefix` — `trim`, `sanitize_key`, and forward slashes). The cursor is treated
+    ///   as exclusive: results include keys strictly greater than the cursor, based on
+    ///   lexicographic comparison of the normalized path. Callers should pass keys produced
+    ///   by this system or normalize with the same rules before calling.
+    /// - `limit` is the maximum number of entries returned; traversal short-circuits once met.
+    /// - When `prefix` is provided, only keys with the normalized path starting with that
+    ///   prefix are considered for both cursor comparison and output.
+    ///
+    /// Notes and future work:
+    /// - For very large stores, walking the filesystem is still O(n). A persistent
+    ///   B-Tree or on-disk index keyed by `<key_rel>` → `<latest_version>` would
+    ///   provide O(log n) seek plus O(k) page reads. Hook here to swap in such an
+    ///   index when available.
+    pub fn list_latest_page(
+        &self,
+        pons: &str,
+        prefix: Option<&str>,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ObjectRef>> {
+        use std::collections::BTreeSet;
+
         let pons = sanitize_key(pons)?;
         let pref_norm = if let Some(raw) = prefix {
             let trimmed = raw.trim();
@@ -243,22 +277,39 @@ impl PonsStore {
         } else {
             String::new()
         };
+        let cursor_norm = if let Some(cur) = start_after {
+            let trimmed = cur.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(sanitize_key(trimmed)?)
+            }
+        } else {
+            None
+        };
+
         let pons_dir = self.pons_dir(&pons);
         if !pons_dir.exists() || limit == 0 {
             return Ok(Vec::new());
         }
 
-        let mut out = Vec::new();
-        let mut stack = vec![pons_dir.clone()];
-        while let Some(dir) = stack.pop() {
+        // Lexicographically ordered frontier for deterministic traversal.
+        let mut frontier: BTreeSet<PathBuf> = BTreeSet::new();
+        frontier.insert(pons_dir.clone());
+
+        let mut out = Vec::with_capacity(limit.min(128));
+        while let Some(dir) = frontier.iter().next().cloned() {
+            frontier.remove(&dir);
+
+            // Collect child directories and insert into frontier (BTreeSet keeps them sorted).
             for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
                 let path = entry.path();
-
                 if !path.is_dir() {
                     continue;
                 }
 
+                // Skip the VERSIONS leaf directory itself.
                 if path
                     .file_name()
                     .map(|s| s == OsStr::new(VERSIONS_DIR))
@@ -274,25 +325,32 @@ impl PonsStore {
                         .unwrap()
                         .to_string_lossy()
                         .replace('\\', "/");
+
                     if !pref_norm.is_empty() && !key_rel.starts_with(&pref_norm) {
                         continue;
+                    }
+                    if let Some(cur) = &cursor_norm {
+                        if key_rel <= *cur {
+                            // Not past the cursor yet; skip.
+                            continue;
+                        }
                     }
 
                     let latest = match fs::read_to_string(path.join(LATEST_FILE)) {
                         Ok(s) => s.trim().to_string(),
                         Err(_) => self.scan_latest_version(&versions)?,
                     };
-
                     let obj_ref = self.get_object_ref(&pons, &key_rel, &latest)?;
                     out.push(obj_ref);
                     if out.len() >= limit {
                         return Ok(out);
                     }
                 } else {
-                    stack.push(path);
+                    frontier.insert(path);
                 }
             }
         }
+
         Ok(out)
     }
 

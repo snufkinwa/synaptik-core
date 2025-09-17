@@ -19,16 +19,20 @@ pub struct StreamGateConfig {
 }
 
 fn norm(s: &str) -> String {
+    // NOTE: Keep in sync with evaluator.rs normalization. Consider moving to a shared util.
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
-        // lowercase and drop control / zero-width
+        // Drop control characters early.
         if ch.is_control() {
             continue;
         }
-        let lc = ch.to_ascii_lowercase();
-        match lc {
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
-            _ => out.push(lc),
+        // Use Unicode-aware lowercasing. Some chars expand to multiple codepoints.
+        for lc in ch.to_lowercase() {
+            match lc {
+                // Filter zero-width characters
+                '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
+                _ => out.push(lc),
+            }
         }
     }
     out
@@ -100,13 +104,13 @@ impl StreamingIndex {
 
         let mut violated = Vec::new();
 
-        for r in &self.rules_for_action {
+        'rules: for r in &self.rules_for_action {
             // matches_any (exact substring)
             if let Some(list) = &r.matches_any {
                 for m in list {
                     if !m.is_empty() && ntext.contains(&norm(m)) {
                         violated.push(r.clone());
-                        break;
+                        continue 'rules;
                     }
                 }
             }
@@ -115,7 +119,7 @@ impl StreamingIndex {
                 for m in list {
                     if !m.is_empty() && ntext.contains(&norm(m)) {
                         violated.push(r.clone());
-                        break;
+                        continue 'rules;
                     }
                 }
             }
@@ -124,7 +128,7 @@ impl StreamingIndex {
                 for m in &r.contains {
                     if !m.is_empty() && ntext.contains(&norm(m)) {
                         violated.push(r.clone());
-                        break;
+                        continue 'rules;
                     }
                 }
             }

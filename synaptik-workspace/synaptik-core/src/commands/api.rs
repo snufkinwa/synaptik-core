@@ -12,6 +12,8 @@ use crate::services::ethos::{Decision, decision_gate, precheck};
 use crate::services::librarian::{Librarian, LibrarianSettings};
 use crate::services::memory::Memory;
 use crate::utils::pons::{ObjectMetadata as PonsMetadata, ObjectRef as PonsObjectRef, PonsStore};
+use once_cell::sync::OnceCell;
+use std::sync::Arc;
 
 use crate::commands::init::ensure_initialized_once;
 use crate::commands::{HitSource, Prefer, RecallResult, bytes_to_string_owned};
@@ -21,6 +23,7 @@ pub struct Commands {
     librarian: Librarian, // no DB inside
     config: CoreConfig,
     root: PathBuf,
+    pons_store: OnceCell<Arc<PonsStore>>, // lazily initialized, shared store
 }
 
 #[derive(Debug, Serialize)]
@@ -109,13 +112,17 @@ impl CommandsBuilder {
             librarian,
             config: self.config,
             root: self.root.clone(),
+            pons_store: OnceCell::new(),
         })
     }
 }
 
 impl Commands {
-    fn pons_store(&self) -> Result<PonsStore> {
-        PonsStore::open(self.root.clone())
+    fn pons_store(&self) -> Result<Arc<PonsStore>> {
+        let store_ref = self
+            .pons_store
+            .get_or_try_init(|| PonsStore::open(self.root.clone()).map(Arc::new))?;
+        Ok(Arc::clone(store_ref))
     }
 
     // -------------------- Path/name helpers --------------------
@@ -174,7 +181,10 @@ impl Commands {
         extra: Option<Value>,
     ) -> Result<PonsObjectRef> {
         let store = self.pons_store()?;
-        let (obj, _) = store.put_object_with_meta(pons, key, data, media_type, extra)?;
+        // Filesystem paths are an internal detail of the Pons store.
+        // We expose only the content-addressed ObjectRef; callers shouldn't rely on on-disk paths.
+        let (obj, path) = store.put_object_with_meta(pons, key, data, media_type, extra)?;
+        let _ = path; // explicitly discard internal path to make intent clear
         Ok(obj)
     }
 

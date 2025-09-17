@@ -39,7 +39,7 @@ fn sanitize_name(name: &str) -> String {
 // Mirror DAG's sanitize for path id filenames: replace non-alnum with '_', preserve case.
 fn dag_path_id(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+    .map(|c| c.is_ascii_alphanumeric().then_some(c).unwrap_or('_'))
         .collect()
 }
 
@@ -332,9 +332,11 @@ impl PyCommands {
             bytes
         } else if let Ok(bytes) = data.extract::<&[u8]>() {
             bytes.to_vec()
+        } else if let Ok(s) = data.extract::<String>() {
+            s.into_bytes()
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
-                "data must be bytes or bytearray",
+                "data must be bytes, bytearray, or str",
             ));
         };
 
