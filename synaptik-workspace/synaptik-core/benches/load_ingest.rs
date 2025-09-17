@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -144,7 +143,6 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
             let mut errors = 0usize;
             let mut writes = 0usize;
             let mut replays = 0usize;
-            let mut last_hashes: VecDeque<String> = VecDeque::with_capacity(8);
 
             for i in 0..n {
                 let id = format!("sess{}-i{}", sidx, i);
@@ -177,8 +175,6 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
                 replay_lat.push((t3 - t2).as_secs_f64() * 1000.0);
                 replays += 1;
 
-                if last_hashes.len() >= 8 { last_hashes.pop_front(); }
-                last_hashes.push_back(content_hash);
             }
 
             let mut m = mref.lock().unwrap();
