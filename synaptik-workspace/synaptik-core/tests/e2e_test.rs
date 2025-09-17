@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use synaptik_core::commands::Commands;
 use synaptik_core::services::archivist::Archivist;
-use synaptik_core::services::librarian::Librarian;
+use synaptik_core::services::librarian::{Librarian, LibrarianSettings};
 use synaptik_core::services::memory::Memory;
 
 use synaptik_core::commands::ensure_initialized_once;
@@ -72,7 +72,7 @@ fn commands_remember_reflect_stats() {
 
     // Assert against the canonical DB under .cogniv (via init)
     let report = ensure_initialized_once().expect("init");
-    let db_path = report.root.join("cache").join("memory.db");
+    let db_path = report.config.memory.cache_path.clone();
     let conn = open_sqlite(&db_path);
 
     let got_reflection: Option<String> = conn
@@ -132,7 +132,11 @@ fn contract_lock_prevents_tampering() {
     let _g = contract_test_guard();
     let cmds = Commands::new("ignored", None).expect("commands new");
     let report = ensure_initialized_once().expect("init");
-    let path = report.root.join("contracts").join("nonviolence.toml");
+    let path = report
+        .config
+        .contracts
+        .path
+        .join(&report.config.contracts.default_contract);
 
     let tampered = r#"name = "Tampered"
 version = "0.0.1"
@@ -169,7 +173,7 @@ fn librarian_promote_to_archive_and_restore() {
 
     let archivist = Archivist::open(root.join("archive")).expect("archivist open");
     let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
-    let lib = Librarian::new(Some(archivist));
+    let lib = Librarian::new(Some(archivist), LibrarianSettings::default());
 
     // Ingest
     let content = "This is a large doc we want to cold-store.";
@@ -315,7 +319,11 @@ fn contracts_enforced_on_disk_when_locked() {
     let _g = contract_test_guard();
     let cmds = Commands::new("ignored", None).expect("commands new");
     let report = ensure_initialized_once().expect("init");
-    let path = report.root.join("contracts").join("nonviolence.toml");
+    let path = report
+        .config
+        .contracts
+        .path
+        .join(&report.config.contracts.default_contract);
 
     // Make sure we're in locked mode first
     cmds.lock_contracts();
@@ -349,7 +357,10 @@ violation = "none"
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(restored, "locked evaluation should restore canonical contracts");
+    assert!(
+        restored,
+        "locked evaluation should restore canonical contracts"
+    );
 
     // Now unlock, tamper again, and confirm the tamper persists and is honored
     cmds.unlock_contracts();
@@ -383,7 +394,7 @@ fn commands_total_recall_degrades_to_dag_after_cache_miss() {
 
     // Remove the hot cache row to simulate cache miss
     let report = ensure_initialized_once().expect("init");
-    let db_path = report.root.join("cache").join("memory.db");
+    let db_path = report.config.memory.cache_path.clone();
     let conn = open_sqlite(&db_path);
     conn.execute("DELETE FROM memories WHERE memory_id=?1", [id.as_str()])
         .expect("delete row");
@@ -397,7 +408,9 @@ fn commands_total_recall_degrades_to_dag_after_cache_miss() {
     // Archive-only still returns None here because we deleted the DB row above,
     // so there is no archived_cid to look up. Archive bytes may exist on disk,
     // but recall_archive requires the CID pointer from SQLite.
-    let arch = cmds.recall_with_source(&id, Some("archive")).expect("recall_archive");
+    let arch = cmds
+        .recall_with_source(&id, Some("archive"))
+        .expect("recall_archive");
     let arch = arch.map(|(s, _)| s);
     assert!(arch.is_none());
 }
@@ -419,9 +432,10 @@ fn commands_total_recall_many_batch_uses_dag() {
 
     // Promote all hot rows in this lobe via Memory API using the same DB
     let report = ensure_initialized_once().expect("init");
-    let db_path = report.root.join("cache").join("memory.db");
+    let db_path = report.config.memory.cache_path.clone();
     let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
-    mem.promote_all_hot_in_lobe("batch").expect("promote all hot");
+    mem.promote_all_hot_in_lobe("batch")
+        .expect("promote all hot");
 
     // Delete from hot cache to force fallback
     let conn = open_sqlite(&db_path);
@@ -438,7 +452,11 @@ fn commands_total_recall_many_batch_uses_dag() {
     // Expect 2 results, likely sourced from DAG (archive could also serve, both are acceptable)
     assert_eq!(out.len(), 2);
     for (rid, content, source) in out {
-        assert!(source == "dag" || source == "archive", "unexpected source: {}", source);
+        assert!(
+            source == "dag" || source == "archive",
+            "unexpected source: {}",
+            source
+        );
         if rid == id1 {
             assert_eq!(content, "alpha content");
         } else if rid == id2 {
@@ -448,7 +466,6 @@ fn commands_total_recall_many_batch_uses_dag() {
         }
     }
 }
-
 
 /// Ethos risk ranking should reflect highest violated rule severity (High for personal threats)
 #[test]
@@ -528,27 +545,40 @@ fn commands_remember_allows_tech_idioms() {
 fn commands_recall_parity_across_tiers() {
     // Write a fresh row directly via Memory to avoid any precheck/policy interference.
     let report = ensure_initialized_once().expect("init");
-    let db_path = report.root.join("cache").join("memory.db");
+    let db_path = report.config.memory.cache_path.clone();
     let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
 
     let lobe = "parity";
     let id = "parity_profile_1";
     let content = b"User Name: Alex\nRole: Engineer\nPrefers: concise answers.";
-    mem.remember(id, lobe, "profile_1", content).expect("mem remember");
+    mem.remember(id, lobe, "profile_1", content)
+        .expect("mem remember");
 
     // Promote this specific id to DAG (marks archived_cid) and write filesystem archive
     mem.promote_to_dag(id).expect("promote_to_dag");
     // Ensure archive object exists
-    let arch = Archivist::open(report.root.join("archive")).expect("arch open");
+    let arch = Archivist::open(&report.config.memory.archive_path).expect("arch open");
     let bytes = mem.recall(id).expect("recall bytes").expect("some bytes");
     let _ = arch.archive(id, &bytes).expect("archive bytes");
 
     let cmds = Commands::new("ignored", None).expect("commands new");
 
     // Recall with explicit sources
-    let hot = cmds.recall_with_source(id, Some("hot")).expect("recall_hot").map(|(s, _)| s).expect("hot some");
-    let arc = cmds.recall_with_source(id, Some("archive")).expect("recall_archive").map(|(s, _)| s).expect("arc some");
-    let dag = cmds.recall_with_source(id, Some("dag")).expect("recall_dag").map(|(s, _)| s).expect("dag some");
+    let hot = cmds
+        .recall_with_source(id, Some("hot"))
+        .expect("recall_hot")
+        .map(|(s, _)| s)
+        .expect("hot some");
+    let arc = cmds
+        .recall_with_source(id, Some("archive"))
+        .expect("recall_archive")
+        .map(|(s, _)| s)
+        .expect("arc some");
+    let dag = cmds
+        .recall_with_source(id, Some("dag"))
+        .expect("recall_dag")
+        .map(|(s, _)| s)
+        .expect("dag some");
 
     assert_eq!(hot.as_str(), std::str::from_utf8(content).unwrap());
     assert_eq!(arc.as_str(), std::str::from_utf8(content).unwrap());
@@ -579,17 +609,13 @@ fn commands_auto_promotion_writes_archive_objects() {
 
     // Resolve archive dir from init and assert the CIDs exist as files
     let report = ensure_initialized_once().expect("init");
-    let arch_dir = report.root.join("archive");
+    let arch_dir = report.config.memory.archive_path.clone();
     assert!(arch_dir.exists(), ".cogniv/archive should exist");
 
     for text in contents {
         let cid = blake3::hash(text.as_bytes()).to_hex().to_string();
         let p = arch_dir.join(&cid);
-        assert!(
-            p.exists(),
-            "expected archive object missing: {:?}",
-            p
-        );
+        assert!(p.exists(), "expected archive object missing: {:?}", p);
     }
 }
 
@@ -631,7 +657,7 @@ fn commands_recall_heals_and_returns_all_tiers() {
 
     // Verify archived_cid is set correctly in DB and file exists
     let report = ensure_initialized_once().expect("init");
-    let db_path = report.root.join("cache").join("memory.db");
+    let db_path = report.config.memory.cache_path.clone();
     let conn = open_sqlite(&db_path);
     let cid: Option<String> = conn
         .query_row(
@@ -643,7 +669,7 @@ fn commands_recall_heals_and_returns_all_tiers() {
         .flatten();
     let expected_cid = blake3::hash(content.as_bytes()).to_hex().to_string();
     assert_eq!(cid.as_deref(), Some(expected_cid.as_str()));
-    let arch_file = report.root.join("archive").join(&expected_cid);
+    let arch_file = report.config.memory.archive_path.join(&expected_cid);
     assert!(arch_file.exists(), "archive blob should exist");
 }
 
@@ -708,7 +734,7 @@ fn commands_remember_dedupes_exact_duplicates() {
 
     // Verify only one row with this exact content exists
     let report = ensure_initialized_once().expect("init");
-    let db_path = report.root.join("cache").join("memory.db");
+    let db_path = report.config.memory.cache_path.clone();
     let conn = open_sqlite(&db_path);
     let cnt: i64 = conn
         .query_row(
@@ -725,7 +751,7 @@ fn commands_remember_dedupes_exact_duplicates() {
 fn commands_auto_prune_removes_existing_duplicates() {
     // Prepare duplicates directly via Memory in the canonical DB
     let report = ensure_initialized_once().expect("init");
-    let db_path = report.root.join("cache").join("memory.db");
+    let db_path = report.config.memory.cache_path.clone();
     let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
 
     let ns = SystemTime::now()
@@ -812,12 +838,8 @@ fn dag_provenance_snapshot_meta_and_citations() -> anyhow::Result<()> {
         "provenance": { "sources": [src_a, src_b, // duplicate A to test dedupe
                                         {"kind":"doc","uri":"file:///notes/paper.pdf#p=3","cid":"blake3:aaa111","range":{"start":120,"end":245}} ]}
     });
-    let _node_file = synaptik_core::memory::dag::save_node(
-        &format!("prov_s0_{}", ns),
-        &content0,
-        &meta0,
-        &[],
-    )?;
+    let _node_file =
+        synaptik_core::memory::dag::save_node(&format!("prov_s0_{}", ns), &content0, &meta0, &[])?;
     let hash0 = blake3::hash(content0.as_bytes()).to_hex().to_string();
 
     // Snapshot meta includes provenance
@@ -839,7 +861,9 @@ fn dag_provenance_snapshot_meta_and_citations() -> anyhow::Result<()> {
     let line = cmds.dag_trace_path(&path, 10).expect("trace_path");
     assert!(line.len() >= 2);
     let head_hash = line[0]
-        .get("hash").and_then(|v| v.as_str()).unwrap_or("")
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
         .to_string();
     assert_eq!(head_hash, new_hash);
 
@@ -862,12 +886,8 @@ fn dag_rewind_and_branch_flow() -> anyhow::Result<()> {
     let key = "main";
     let content0 = serde_json::json!({"t": 0}).to_string();
     let meta0 = serde_json::json!({"lobe": lobe, "key": key});
-    let _node_file = synaptik_core::memory::dag::save_node(
-        &format!("s0_{}", ns),
-        &content0,
-        &meta0,
-        &[],
-    )?;
+    let _node_file =
+        synaptik_core::memory::dag::save_node(&format!("s0_{}", ns), &content0, &meta0, &[])?;
     let hash0 = blake3::hash(content0.as_bytes()).to_hex().to_string();
 
     // Recall snapshot by its content-addressed id
@@ -913,23 +933,45 @@ fn dag_writes_are_consistent() -> anyhow::Result<()> {
 
     // 3) Inspect refs/hashes to get node filename; confirm node exists.
     let report = ensure_initialized_once().expect("init");
-    let hashes_ref = report.root.join("refs").join("hashes").join(format!("{}.json", cid));
+    let hashes_ref = report
+        .root
+        .join("refs")
+        .join("hashes")
+        .join(format!("{}.json", cid));
     assert!(hashes_ref.exists(), "hash index should exist");
     let idx_bytes = std::fs::read(&hashes_ref)?;
     let idx_v: Value = serde_json::from_slice(&idx_bytes)?;
     let node_name = idx_v.get("node").and_then(|x| x.as_str()).unwrap_or("");
-    assert!(!node_name.is_empty(), "hash index must contain node filename");
+    assert!(
+        !node_name.is_empty(),
+        "hash index must contain node filename"
+    );
     let node_path = report.root.join("dag").join("nodes").join(node_name);
     assert!(node_path.exists(), "node file must exist for cid");
 
     // 4) Validate node contents: id/lobe/key/hash/content present
     let node_bytes = std::fs::read(&node_path)?;
     let node_v: Value = serde_json::from_slice(&node_bytes)?;
-    assert_eq!(node_v.get("hash").and_then(|x| x.as_str()), Some(cid.as_str()));
-    assert_eq!(node_v.get("id").and_then(|x| x.as_str()), Some(mem_id.as_str()));
-    assert_eq!(node_v.get("lobe").and_then(|x| x.as_str()), Some(lobe.as_str()));
+    assert_eq!(
+        node_v.get("hash").and_then(|x| x.as_str()),
+        Some(cid.as_str())
+    );
+    assert_eq!(
+        node_v.get("id").and_then(|x| x.as_str()),
+        Some(mem_id.as_str())
+    );
+    assert_eq!(
+        node_v.get("lobe").and_then(|x| x.as_str()),
+        Some(lobe.as_str())
+    );
     assert_eq!(node_v.get("key").and_then(|x| x.as_str()), Some(key));
-    assert!(node_v.get("content").and_then(|x| x.as_str()).unwrap_or("").contains("hello dag write"));
+    assert!(
+        node_v
+            .get("content")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .contains("hello dag write")
+    );
 
     // 5) Validate stream ref was updated (latest_node/last_hash)
     let stream_name = format!("{}__{}", lobe, key);
@@ -941,8 +983,14 @@ fn dag_writes_are_consistent() -> anyhow::Result<()> {
     assert!(stream_ref.exists(), "stream ref should exist");
     let sref_bytes = std::fs::read(&stream_ref)?;
     let sref_v: Value = serde_json::from_slice(&sref_bytes)?;
-    assert_eq!(sref_v.get("latest_node").and_then(|x| x.as_str()), Some(node_name));
-    assert_eq!(sref_v.get("last_hash").and_then(|x| x.as_str()), Some(cid.as_str()));
+    assert_eq!(
+        sref_v.get("latest_node").and_then(|x| x.as_str()),
+        Some(node_name)
+    );
+    assert_eq!(
+        sref_v.get("last_hash").and_then(|x| x.as_str()),
+        Some(cid.as_str())
+    );
 
     // 6) Validate id index maps memory_id -> node
     let id_ref = report
@@ -956,7 +1004,7 @@ fn dag_writes_are_consistent() -> anyhow::Result<()> {
     assert_eq!(id_v.get("node").and_then(|x| x.as_str()), Some(node_name));
 
     // 7) Validate archive object exists for cid
-    let arch_path = report.root.join("archive").join(&cid);
+    let arch_path = report.config.memory.archive_path.join(&cid);
     assert!(arch_path.exists(), "archive object must exist for cid");
 
     Ok(())

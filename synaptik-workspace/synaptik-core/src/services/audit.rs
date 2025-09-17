@@ -5,31 +5,19 @@
 //! - Bridges to the `contracts` crate via `evaluate_contract_json` and normalizes results.
 
 use chrono::{DateTime, Utc};
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use contracts::assets::{read_verified_or_embedded, write_default_contracts};
-use contracts::{evaluate_input_against_rules, MoralContract};
 use crate::commands::init::ensure_initialized_once;
+use crate::config::{CoreConfig, PoliciesConfig};
+use contracts::assets::{read_verified_or_embedded, write_default_contracts};
+use contracts::{MoralContract, evaluate_input_against_rules};
 // ----------- Logbook paths -----------
-
-/// Root directory for audit logs.
-const LOG_DIR: &str = ".cogniv/logbook";
-/// Generic action telemetry (lightweight).
-const ACTIONS_LOG: &str = ".cogniv/logbook/actions.jsonl";
-/// Normalized ethics decisions.
-const ETHICS_LOG: &str = ".cogniv/logbook/ethics.jsonl";
-/// High-risk or failed decisions (subset of ethics).
-const VIOLATIONS_LOG: &str = ".cogniv/logbook/violations.jsonl";
-/// Raw contract evaluation records (inputs/latency/results).
-const CONTRACTS_LOG: &str = ".cogniv/logbook/contracts.jsonl";
-
-/// Length used by [`redact_preview`] to keep inputs privacy-safe yet debuggable.
-const PREVIEW_LEN: usize = 160;
 
 static CONTRACTS_LOCKED: AtomicBool = AtomicBool::new(true);
 
@@ -51,9 +39,10 @@ fn enforce_contracts_on_disk_if_locked() {
         return;
     }
     if let Ok(report) = ensure_initialized_once() {
-        let dir = report.root.join("contracts");
+        let contracts = &report.config.contracts;
+        let dir = contracts.path.clone();
         // Best effort: restore the known canonical contract files unconditionally.
-        let known = ["nonviolence.toml"];
+        let known = [contracts.default_contract.as_str()];
         for name in known {
             let path = dir.join(name);
             if let Ok(text) = read_verified_or_embedded(&path, name, true) {
@@ -145,7 +134,7 @@ pub struct EthicsDecision {
 pub fn start() {
     println!(" Audit Agent — Contract-aware compliance logging");
     ensure_dirs();
-    println!("   • Logbook directory: {}", LOG_DIR);
+    println!("   • Logbook directory: {}", log_paths().dir.display());
     println!("   • Ready.");
 }
 
@@ -160,6 +149,9 @@ pub fn start() {
 /// # Returns
 /// Nothing. Appends a single JSON object to `actions.jsonl`.
 pub fn record_action(agent: &str, action: &str, details: &Value, severity: &str) {
+    if !audit_enabled() {
+        return;
+    }
     let entry = json!({
         "timestamp": Utc::now().to_rfc3339(),
         "event": "action",
@@ -168,7 +160,7 @@ pub fn record_action(agent: &str, action: &str, details: &Value, severity: &str)
         "severity": severity,
         "details": details
     });
-    append_jsonl(ACTIONS_LOG, &entry);
+    append_jsonl(&log_paths().actions, &entry);
 }
 
 /// Evaluate a contract via the **contracts** package and **log** the evaluation.
@@ -194,17 +186,11 @@ pub fn evaluate_and_audit_contract(
 ) -> Result<Value, String> {
     // Opportunistically restore canonical contracts when locked.
     enforce_contracts_on_disk_if_locked();
-    let path = match meta.contract_name.as_deref() {
-        Some("nonviolence_ethics") => ".cogniv/contracts/nonviolence.toml",
-        _ => ".cogniv/contracts/nonviolence.toml",
-    };
-    let file_name = Path::new(path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let settings = contracts_settings();
+    let path = settings.dir.join(&settings.default_contract);
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let locked = CONTRACTS_LOCKED.load(Ordering::SeqCst);
-    let text =
-        read_verified_or_embedded(Path::new(path), file_name, locked).map_err(|e| e.to_string())?;
+    let text = read_verified_or_embedded(&path, file_name, locked).map_err(|e| e.to_string())?;
     let contract: MoralContract = toml::from_str(text.as_ref()).map_err(|e| e.to_string())?;
     let t0 = std::time::Instant::now();
     let result_struct = evaluate_input_against_rules(message, &contract);
@@ -220,7 +206,9 @@ pub fn evaluate_and_audit_contract(
         result: result_json.clone(),
         metadata: meta.metadata.clone(),
     };
-    append_jsonl(CONTRACTS_LOG, &rec);
+    if audit_enabled() {
+        append_jsonl(&log_paths().contracts, &rec);
+    }
     Ok(result_json)
 }
 
@@ -246,6 +234,9 @@ pub fn record_ethics_decision(
     constraints: &[String],
     reason: &str,
 ) {
+    if !audit_enabled() {
+        return;
+    }
     let entry = serde_json::json!({
         "timestamp": Utc::now().to_rfc3339(),
         "intent_category": intent_category,
@@ -257,7 +248,7 @@ pub fn record_ethics_decision(
     });
 
     // Write to ethics log
-    append_jsonl(ETHICS_LOG, &entry);
+    append_jsonl(&log_paths().ethics, &entry);
 
     // Also write a violation event if escalation-worthy
     if (!passed) || matches!(risk, "High" | "Critical") {
@@ -269,7 +260,7 @@ pub fn record_ethics_decision(
             "reason": reason,
             "constraints": constraints,
         });
-        append_jsonl(VIOLATIONS_LOG, &viol);
+        append_jsonl(&log_paths().violations, &viol);
     }
 }
 
@@ -277,8 +268,9 @@ pub fn record_ethics_decision(
 
 /// Ensure the logbook directory exists (idempotent).
 fn ensure_dirs() {
-    if !Path::new(LOG_DIR).exists() {
-        let _ = fs::create_dir_all(LOG_DIR);
+    let path = &log_paths().dir;
+    if !path.exists() {
+        let _ = fs::create_dir_all(path);
     }
 }
 
@@ -310,12 +302,100 @@ fn append_jsonl<P: AsRef<std::path::Path>, S: Serialize>(path: P, val: &S) {
 /// * `s` — Original (potentially sensitive) input.
 ///
 /// # Returns
-/// * A single-line preview: newlines removed, truncated to [`PREVIEW_LEN`] characters with an ellipsis.
+/// * A single-line preview: newlines removed, truncated to the configured preview length with an ellipsis.
 fn redact_preview(s: &str) -> String {
     let mut t = s.replace('\n', " ");
-    if t.len() > PREVIEW_LEN {
-        t.truncate(PREVIEW_LEN);
+    let max_len = preview_len();
+    if t.len() > max_len {
+        t.truncate(max_len);
         t.push('…');
     }
     t
+}
+
+fn log_paths() -> &'static LogPaths {
+    static CELL: OnceCell<LogPaths> = OnceCell::new();
+    CELL.get_or_init(|| match ensure_initialized_once() {
+        Ok(report) => LogPaths::from_config(&report.config),
+        Err(_) => LogPaths::default(),
+    })
+}
+
+fn contracts_settings() -> &'static ContractsSettings {
+    static CELL: OnceCell<ContractsSettings> = OnceCell::new();
+    CELL.get_or_init(|| match ensure_initialized_once() {
+        Ok(report) => ContractsSettings::from_config(&report.config),
+        Err(_) => ContractsSettings::default(),
+    })
+}
+
+fn policies() -> &'static PoliciesConfig {
+    static CELL: OnceCell<PoliciesConfig> = OnceCell::new();
+    CELL.get_or_init(|| match ensure_initialized_once() {
+        Ok(report) => report.config.policies.clone(),
+        Err(_) => PoliciesConfig::default(),
+    })
+}
+
+fn audit_enabled() -> bool {
+    static CELL: OnceCell<bool> = OnceCell::new();
+    *CELL.get_or_init(|| {
+        ensure_initialized_once()
+            .map(|report| report.config.services.audit_enabled)
+            .unwrap_or(true)
+    })
+}
+
+fn preview_len() -> usize {
+    policies().log_preview_len
+}
+
+#[derive(Clone)]
+struct LogPaths {
+    dir: PathBuf,
+    ethics: PathBuf,
+    actions: PathBuf,
+    violations: PathBuf,
+    contracts: PathBuf,
+}
+
+impl LogPaths {
+    fn from_config(cfg: &CoreConfig) -> Self {
+        Self {
+            dir: cfg.logbook.path.clone(),
+            ethics: cfg.logbook.ethics_log.clone(),
+            actions: cfg.logbook.agent_actions.clone(),
+            violations: cfg.logbook.contract_violations.clone(),
+            contracts: cfg.logbook.contracts_log.clone(),
+        }
+    }
+}
+
+impl Default for LogPaths {
+    fn default() -> Self {
+        let cfg = CoreConfig::default();
+        Self::from_config(&cfg)
+    }
+}
+
+#[derive(Clone)]
+struct ContractsSettings {
+    dir: PathBuf,
+    default_contract: String,
+}
+
+impl ContractsSettings {
+    fn from_config(cfg: &CoreConfig) -> Self {
+        Self {
+            dir: cfg.contracts.path.clone(),
+            default_contract: cfg.contracts.default_contract.clone(),
+        }
+    }
+}
+
+impl Default for ContractsSettings {
+    fn default() -> Self {
+        let cfg = CoreConfig::default();
+        Self::from_config(&cfg)
+    }
 }

@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use blake3;
-use std::{borrow::Cow, fs, path::{Path, PathBuf}};
+use std::{
+    borrow::Cow,
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// === Embedded canon contracts ===
 pub const NONVIOLENCE_TOML_NAME: &str = "nonviolence.toml";
@@ -18,18 +22,14 @@ pub fn default_contract_text(name: &str) -> Option<&'static str> {
 /// Returns a list of files that were created.
 pub fn write_default_contracts(dir: impl AsRef<Path>) -> Result<Vec<String>> {
     let dir = dir.as_ref();
-    fs::create_dir_all(dir)
-        .with_context(|| format!("create_dir_all({:?})", dir))?;
+    fs::create_dir_all(dir).with_context(|| format!("create_dir_all({:?})", dir))?;
 
     let mut created = Vec::new();
 
-    for (name, text) in [
-        (NONVIOLENCE_TOML_NAME, NONVIOLENCE_TOML),
-    ] {
+    for (name, text) in [(NONVIOLENCE_TOML_NAME, NONVIOLENCE_TOML)] {
         let path = dir.join(name);
         if !path.exists() {
-            fs::write(&path, text)
-                .with_context(|| format!("write {:?}", path))?;
+            fs::write(&path, text).with_context(|| format!("write {:?}", path))?;
             created.push(name.to_string());
         }
     }
@@ -53,7 +53,11 @@ pub fn write_default_contracts(dir: impl AsRef<Path>) -> Result<Vec<String>> {
 ///   - return embedded
 ///
 /// - If we don’t have an embedded copy for `name`, just try to read the file best-effort.
-pub fn read_verified_or_embedded(path: &Path, name: &str, locked: bool) -> Result<Cow<'static, str>> {
+pub fn read_verified_or_embedded(
+    path: &Path,
+    name: &str,
+    locked: bool,
+) -> Result<Cow<'static, str>> {
     let embedded_opt = default_contract_text(name);
 
     // Try reading local file if present.

@@ -1,21 +1,23 @@
 // src/commands/mod.rs
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use crate::config::CoreConfig;
+use crate::memory::dag::MemoryState as DagMemoryState;
 use crate::services::archivist::Archivist;
 use crate::services::audit::{lock_contracts, record_action, unlock_contracts};
-use crate::services::ethos::{decision_gate, precheck, Decision};
-use crate::services::librarian::Librarian;
+use crate::services::ethos::{Decision, decision_gate, precheck};
+use crate::services::librarian::{Librarian, LibrarianSettings};
 use crate::services::memory::Memory;
-use crate::memory::dag::MemoryState as DagMemoryState;
 
 use crate::commands::init::ensure_initialized_once;
-use crate::commands::{bytes_to_string_owned, HitSource, Prefer, RecallResult};
+use crate::commands::{HitSource, Prefer, RecallResult, bytes_to_string_owned};
 
 pub struct Commands {
     memory: Memory,       // one SQLite connection here
     librarian: Librarian, // no DB inside
+    config: CoreConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,6 +28,83 @@ pub struct EthosReport {
     pub constraints: Vec<String>,
     pub action_suggestion: Option<String>,
     pub violation_code: Option<String>,
+}
+
+pub struct CommandsBuilder {
+    config: CoreConfig,
+    memory: Option<Memory>,
+    archivist: Option<Archivist>,
+    librarian: Option<Librarian>,
+}
+
+impl CommandsBuilder {
+    pub fn from_environment() -> Result<Self> {
+        let report = ensure_initialized_once()?;
+        Ok(Self {
+            config: report.config.clone(),
+            memory: None,
+            archivist: None,
+            librarian: None,
+        })
+    }
+
+    pub fn with_config(mut self, config: CoreConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn with_memory(mut self, memory: Memory) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    pub fn with_archivist(mut self, archivist: Archivist) -> Self {
+        self.archivist = Some(archivist);
+        self
+    }
+
+    pub fn with_librarian(mut self, librarian: Librarian) -> Self {
+        self.librarian = Some(librarian);
+        self
+    }
+
+    pub fn build(mut self) -> Result<Commands> {
+        let memory = if let Some(memory) = self.memory.take() {
+            memory
+        } else {
+            let db_path = self
+                .config
+                .memory
+                .cache_path
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid UTF-8 db path"))?;
+            Memory::open(db_path)?
+        };
+
+        let archivist = if let Some(archivist) = self.archivist.take() {
+            Some(archivist)
+        } else if self.config.services.librarian_enabled {
+            Some(Archivist::open(&self.config.memory.archive_path)?)
+        } else {
+            None
+        };
+
+        let librarian = if let Some(librarian) = self.librarian.take() {
+            librarian
+        } else {
+            let settings = LibrarianSettings::from_policies(
+                &self.config.policies,
+                self.config.services.librarian_enabled,
+            );
+            Librarian::new(archivist.clone(), settings)
+        };
+
+        Ok(Commands {
+            memory,
+            librarian,
+            config: self.config,
+        })
+    }
 }
 
 impl Commands {
@@ -58,29 +137,30 @@ impl Commands {
 
     // Keep the signature for now; ignore the args. Prefix with _ to silence warnings.
     pub fn new(_db_path: &str, _archivist: Option<Archivist>) -> Result<Self> {
-        let report = ensure_initialized_once()?;
+        Self::builder()?.build()
+    }
 
-        // Hard-coded canonical locations
-        let cache_db = report.root.join("cache").join("memory.db");
-        let archive_root = report.root.join("archive");
+    pub fn builder() -> Result<CommandsBuilder> {
+        CommandsBuilder::from_environment()
+    }
 
-        // If Memory::open takes &str:
-        let memory = Memory::open(
-            cache_db
-                .to_str()
-                .ok_or_else(|| anyhow!("invalid UTF-8 db path"))?,
-        )?;
-
-        // Pass by value (impl Into<PathBuf>)
-        let archivist = Archivist::open(archive_root)?;
-        let librarian = Librarian::new(Some(archivist));
-
-        // Build directly (since from_parts doesn't exist)
-        Ok(Self { memory, librarian })
+    pub fn config(&self) -> &CoreConfig {
+        &self.config
     }
 
     /// Gate arbitrary text with Ethos (for normal chat).
     pub fn precheck_text(&self, text: &str, purpose: &str) -> Result<EthosReport> {
+        if !self.config.services.ethos_enabled {
+            return Ok(EthosReport {
+                decision: "allow".to_string(),
+                reason: "ethos_disabled".to_string(),
+                risk: "Low".to_string(),
+                constraints: Vec::new(),
+                action_suggestion: None,
+                violation_code: None,
+            });
+        }
+
         let v = precheck(text, purpose).map_err(|e| anyhow!("ethos precheck error: {e}"))?;
         let decision = match decision_gate(&v) {
             Decision::Allow => "allow",
@@ -116,23 +196,23 @@ impl Commands {
 
     /// Recall full text (auto: hot → archive → dag). Returns just the content string.
     pub fn recall(&self, memory_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .recall_any(memory_id, Prefer::Auto)?
-            .map(|r| r.content))
+        Ok(self.recall_any(memory_id, Prefer::Auto)?.map(|r| r.content))
     }
 
     /// Layered recall returning which source was used. prefer: "hot"|"archive"|"dag"|"auto"
-    pub fn recall_with_source(&self, memory_id: &str, prefer: Option<&str>) -> Result<Option<(String, String)>> {
-        Ok(self
-            .recall_any(memory_id, parse_prefer(prefer))?
-            .map(|r| {
-                let src = match r.source {
-                    HitSource::Hot => "hot",
-                    HitSource::Archive => "archive",
-                    HitSource::Dag => "dag",
-                };
-                (r.content, src.to_string())
-            }))
+    pub fn recall_with_source(
+        &self,
+        memory_id: &str,
+        prefer: Option<&str>,
+    ) -> Result<Option<(String, String)>> {
+        Ok(self.recall_any(memory_id, parse_prefer(prefer))?.map(|r| {
+            let src = match r.source {
+                HitSource::Hot => "hot",
+                HitSource::Archive => "archive",
+                HitSource::Dag => "dag",
+            };
+            (r.content, src.to_string())
+        }))
     }
 
     /// Bulk alias: for each id, attempt multi-tier recall and include id, content, and source.
@@ -165,27 +245,29 @@ impl Commands {
             "low",
         );
 
-        let v = precheck(content, "memory_storage")
-            .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
-        match decision_gate(&v) {
-            Decision::Block => {
-                record_action(
-                    "commands",
-                    "remember_blocked",
-                    &json!({"reason": v.reason, "risk": v.risk}),
-                    "high",
-                );
-                return Err(anyhow!("blocked by ethics: {}", v.reason));
+        if self.config.services.ethos_enabled {
+            let v = precheck(content, "memory_storage")
+                .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
+            match decision_gate(&v) {
+                Decision::Block => {
+                    record_action(
+                        "commands",
+                        "remember_blocked",
+                        &json!({"reason": v.reason, "risk": v.risk}),
+                        "high",
+                    );
+                    return Err(anyhow!("blocked by ethics: {}", v.reason));
+                }
+                Decision::AllowWithConstraints => {
+                    record_action(
+                        "commands",
+                        "remember_constraints",
+                        &json!({"constraints": v.constraints, "risk": v.risk}),
+                        "medium",
+                    );
+                }
+                Decision::Allow => {}
             }
-            Decision::AllowWithConstraints => {
-                record_action(
-                    "commands",
-                    "remember_constraints",
-                    &json!({"constraints": v.constraints, "risk": v.risk}),
-                    "medium",
-                );
-            }
-            Decision::Allow => {}
         }
 
         // Normalize to match Librarian’s behavior when lobe is empty.
@@ -202,23 +284,26 @@ impl Commands {
             "low",
         );
 
-        // 2) AUTO-PROMOTE RULE (count-based): if hot >= 5 → promote all hot in this lobe
+        // 2) AUTO-PROMOTE RULE (count-based)
         //    Hot = total - archived (we reuse existing tiny helpers here).
         let total = count_rows(&self.memory, Some(lobe_eff))?;
         let archived = count_archived(&self.memory, Some(lobe_eff))?;
         let hot = total.saturating_sub(archived);
 
         // 2a) AUTO-PRUNE (exact duplicates) after every write to keep hot store clean.
-        if let Ok(deleted) = self.memory.prune_exact_duplicates_in_lobe(lobe_eff) {
-            record_action(
-                "commands",
-                "auto_prune_duplicates",
-                &json!({"lobe": lobe_eff, "deleted": deleted, "hot": hot}),
-                if deleted > 0 { "medium" } else { "low" },
-            );
+        if self.config.policies.auto_prune_duplicates {
+            if let Ok(deleted) = self.memory.prune_exact_duplicates_in_lobe(lobe_eff) {
+                record_action(
+                    "commands",
+                    "auto_prune_duplicates",
+                    &json!({"lobe": lobe_eff, "deleted": deleted, "hot": hot}),
+                    if deleted > 0 { "medium" } else { "low" },
+                );
+            }
         }
 
-        if hot >= 5 {
+        let promote_threshold = self.config.policies.promote_hot_threshold as u64;
+        if promote_threshold > 0 && hot >= promote_threshold {
             if let Ok(promoted) = self.memory.promote_all_hot_in_lobe(lobe_eff) {
                 record_action(
                     "commands",
@@ -251,7 +336,11 @@ impl Commands {
         );
 
         let pool = self.memory.recent_summaries_by_lobe(lobe, window)?;
-        let note = compute_reflection(&pool, 3, 3);
+        let note = compute_reflection(
+            &pool,
+            self.config.policies.reflection_min_count,
+            self.config.policies.reflection_max_keywords,
+        );
         if note.is_empty() {
             record_action(
                 "commands",
@@ -262,16 +351,18 @@ impl Commands {
             return Ok(String::new());
         }
 
-        let v = precheck(&note, "reflection_update")
-            .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
-        if matches!(decision_gate(&v), Decision::Block) {
-            record_action(
-                "commands",
-                "reflect_blocked",
-                &json!({"reason": v.reason, "risk": v.risk}),
-                "high",
-            );
-            return Ok(String::new());
+        if self.config.services.ethos_enabled {
+            let v = precheck(&note, "reflection_update")
+                .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
+            if matches!(decision_gate(&v), Decision::Block) {
+                record_action(
+                    "commands",
+                    "reflect_blocked",
+                    &json!({"reason": v.reason, "risk": v.risk}),
+                    "high",
+                );
+                return Ok(String::new());
+            }
         }
 
         if let Some(id) = latest_id_in_lobe(&self.memory, lobe)? {
@@ -404,9 +495,16 @@ impl Commands {
     /// Neuroscience: reconsolidation—integrate multiple traces into one memory.
     /// Note: DAG presently supports single-parent. Until merge nodes are supported, this returns an error
     /// when a fast-forward is not possible.
-    pub fn reconsolidate_paths(&self, main_path: &str, feature_path: &str, _note: &str) -> Result<String> {
+    pub fn reconsolidate_paths(
+        &self,
+        main_path: &str,
+        feature_path: &str,
+        _note: &str,
+    ) -> Result<String> {
         let main_head = self.dag_head(main_path)?.ok_or(anyhow!("no main head"))?;
-        let feat_head = self.dag_head(feature_path)?.ok_or(anyhow!("no feature head"))?;
+        let feat_head = self
+            .dag_head(feature_path)?
+            .ok_or(anyhow!("no feature head"))?;
         if main_head == feat_head {
             return Ok(main_head);
         }
@@ -414,7 +512,9 @@ impl Commands {
             self.update_path_head(main_path, &feat_head)?;
             return Ok(feat_head);
         }
-        Err(anyhow!("merge commits not yet supported; non-FF reconsolidation blocked"))
+        Err(anyhow!(
+            "merge commits not yet supported; non-FF reconsolidation blocked"
+        ))
     }
 
     /// Idempotent, normalized: create a branch at a resolved base.
@@ -460,21 +560,28 @@ impl Commands {
     pub fn append(&self, path: &str, content: &str, meta: Option<Value>) -> Result<String> {
         let path_norm = self.normalize_path_name(path);
         if !crate::memory::dag::path_exists(&path_norm)? {
-            return Err(anyhow!(format!("path '{}' not found; call branch() first", path_norm)));
+            return Err(anyhow!(format!(
+                "path '{}' not found; call branch() first",
+                path_norm
+            )));
         }
 
         // Ethos gate
-        let v = precheck(content, "replay_append").map_err(|e| anyhow!("ethos precheck error: {e}"))?;
-        match decision_gate(&v) {
-            Decision::Block => return Err(anyhow!("blocked by ethics: {}", v.reason)),
-            Decision::AllowWithConstraints => {
-                record_action(
-                    "commands", "append_constraints",
-                    &json!({"path": path_norm, "constraints": v.constraints, "risk": v.risk}),
-                    "medium",
-                );
+        if self.config.services.ethos_enabled {
+            let v = precheck(content, "replay_append")
+                .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
+            match decision_gate(&v) {
+                Decision::Block => return Err(anyhow!("blocked by ethics: {}", v.reason)),
+                Decision::AllowWithConstraints => {
+                    record_action(
+                        "commands",
+                        "append_constraints",
+                        &json!({"path": path_norm, "constraints": v.constraints, "risk": v.risk}),
+                        "medium",
+                    );
+                }
+                Decision::Allow => {}
             }
-            Decision::Allow => {}
         }
 
         let parent = self.dag_head(&path_norm)?;
@@ -490,12 +597,17 @@ impl Commands {
         });
         let merged_meta = match meta.unwrap_or_else(|| json!({})) {
             Value::Object(mut m) => {
-                if let Value::Object(e) = enrich { for (k, v) in e { m.insert(k, v); } }
+                if let Value::Object(e) = enrich {
+                    m.extend(e);
+                }
                 Value::Object(m)
             }
             _ => enrich,
         };
-        let state = DagMemoryState { content: content.to_string(), meta: merged_meta };
+        let state = DagMemoryState {
+            content: content.to_string(),
+            meta: merged_meta,
+        };
         let id = self.replay_extend_path(&path_norm, state)?;
         Ok(id)
     }
@@ -559,7 +671,9 @@ impl Commands {
                     .prepare("SELECT DISTINCT lobe FROM memories")?;
                 let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
                 let mut out = Vec::new();
-                for r in rows { out.push(r?); }
+                for r in rows {
+                    out.push(r?);
+                }
                 out
             };
             let mut acc = 0usize;
@@ -650,7 +764,9 @@ impl Commands {
     /// Returns true if an index was written.
     pub fn reindex_dag_id(&self, memory_id: &str) -> Result<bool> {
         if let Some((lobe, key)) = self.memory.lobe_key(memory_id)? {
-            return Ok(crate::memory::dag::reindex_id_to_latest(memory_id, &lobe, &key)?);
+            return Ok(crate::memory::dag::reindex_id_to_latest(
+                memory_id, &lobe, &key,
+            )?);
         }
         Ok(false)
     }
@@ -660,16 +776,21 @@ impl Commands {
     pub fn ensure_archive_for(&self, memory_id: &str) -> Result<Option<String>> {
         // If CID already set, ensure the blob exists; if missing, reconstruct from hot or DAG.
         if let Some(existing_cid) = self.memory.get_archived_cid(memory_id)? {
-            let report = ensure_initialized_once()?;
-            let arch = Archivist::open(report.root.join("archive"))?;
+            let arch = Archivist::open(&self.config.memory.archive_path)?;
             match arch.retrieve(&existing_cid) {
                 Ok(bytes) => {
                     // Re-cache hot under original lobe/key if possible
                     if let Some((lobe, key)) = self.memory.lobe_key(memory_id)? {
                         let _ = self.memory.remember(memory_id, &lobe, &key, &bytes);
                     } else if let Some(node) = crate::memory::dag::load_node_by_id(memory_id)? {
-                        let lobe = node.get("lobe").and_then(|v| v.as_str()).unwrap_or("restored");
-                        let key  = node.get("key").and_then(|v| v.as_str()).unwrap_or("restored");
+                        let lobe = node
+                            .get("lobe")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("restored");
+                        let key = node
+                            .get("key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("restored");
                         let _ = self.memory.remember(memory_id, lobe, key, &bytes);
                     }
                     return Ok(Some(existing_cid));
@@ -687,8 +808,7 @@ impl Commands {
         };
         if let Some(bytes) = bytes_opt {
             // Write archive blob and set DB pointer (open archivist at canonical path)
-            let report = ensure_initialized_once()?;
-            let arch = Archivist::open(report.root.join("archive"))?;
+            let arch = Archivist::open(&self.config.memory.archive_path)?;
             let cid = arch.archive(memory_id, &bytes)?;
             let now = chrono::Utc::now().to_rfc3339();
             self.memory.mark_archived(memory_id, &cid, &now)?;
@@ -755,8 +875,14 @@ impl Commands {
                         let _ = self.memory.promote_to_dag(memory_id);
                         if let Some(s2) = crate::memory::dag::content_by_id(memory_id)? {
                             if let Some(node) = crate::memory::dag::load_node_by_id(memory_id)? {
-                                let lobe = node.get("lobe").and_then(|v| v.as_str()).unwrap_or("restored");
-                                let key  = node.get("key").and_then(|v| v.as_str()).unwrap_or("restored");
+                                let lobe = node
+                                    .get("lobe")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("restored");
+                                let key = node
+                                    .get("key")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("restored");
                                 self.memory.remember(memory_id, lobe, key, s2.as_bytes())?;
                             }
                             return Ok(Some(RecallResult {
@@ -796,7 +922,7 @@ fn parse_prefer(s: Option<&str>) -> Prefer {
 }
 
 /// Tiny, deterministic keyword theme line (command-level helper).
-fn compute_reflection(summaries: &[String], min_count: usize, max_tokens: usize) -> String {
+fn compute_reflection(summaries: &[String], min_count: usize, max_keywords: usize) -> String {
     use std::collections::HashMap;
     const STOP: &[&str] = &[
         "the", "and", "for", "with", "that", "this", "from", "have", "are", "was", "were", "you",
@@ -818,7 +944,7 @@ fn compute_reflection(summaries: &[String], min_count: usize, max_tokens: usize)
     let mut toks: Vec<(String, usize)> =
         freq.into_iter().filter(|(_, c)| *c >= min_count).collect();
     toks.sort_by(|a, b| b.1.cmp(&a.1));
-    toks.truncate(max_tokens);
+    toks.truncate(max_keywords);
     if toks.is_empty() {
         return String::new();
     }

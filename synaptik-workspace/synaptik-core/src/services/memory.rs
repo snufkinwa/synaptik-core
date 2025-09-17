@@ -7,10 +7,10 @@
 //! - Adds best-effort promotion helpers to write nodes into the DAG **linearly per lobe**.
 //! - Leaves reads DB-first for MVP (no DAG reads/pruning in this pass).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use blake3;
 use chrono::Utc;
-use rusqlite:: Connection;
+use rusqlite::Connection;
 use serde_json::json;
 use std::path::Path;
 
@@ -35,8 +35,8 @@ impl Memory {
                 .with_context(|| format!("creating parent dir for {}", db_path))?;
         }
 
-        let db = Connection::open(db_path)
-            .with_context(|| format!("opening sqlite at {}", db_path))?;
+        let db =
+            Connection::open(db_path).with_context(|| format!("opening sqlite at {}", db_path))?;
 
         // WAL reduces writer/reader blocking; safe for our single-writer design.
         db.execute_batch(
@@ -68,7 +68,11 @@ impl Memory {
     // -------------------------------------------------------------------------
 
     /// Find an exact duplicate row by lobe and content bytes. Returns the latest matching memory_id.
-    pub fn find_exact_duplicate_in_lobe(&self, lobe: &str, content: &[u8]) -> Result<Option<String>> {
+    pub fn find_exact_duplicate_in_lobe(
+        &self,
+        lobe: &str,
+        content: &[u8],
+    ) -> Result<Option<String>> {
         let mut stmt = self.db.prepare(
             "SELECT memory_id FROM memories WHERE lobe=?1 AND content=?2 ORDER BY updated_at DESC LIMIT 1",
         )?;
@@ -178,7 +182,9 @@ impl Memory {
     /// - `Ok(Some(Vec<u8>))` if found,
     /// - `Ok(None)` if missing.
     pub fn recall(&self, memory_id: &str) -> Result<Option<Vec<u8>>> {
-        let mut stmt = self.db.prepare("SELECT content FROM memories WHERE memory_id=?1")?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT content FROM memories WHERE memory_id=?1")?;
         let mut rows = stmt.query([memory_id])?;
         if let Some(row) = rows.next()? {
             let bytes: Vec<u8> = row.get(0)?;
@@ -189,7 +195,9 @@ impl Memory {
 
     /// Read the archived content id (CID) if this memory was promoted to cold storage.
     pub fn get_archived_cid(&self, memory_id: &str) -> Result<Option<String>> {
-        let mut stmt = self.db.prepare("SELECT archived_cid FROM memories WHERE memory_id=?1")?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT archived_cid FROM memories WHERE memory_id=?1")?;
         let mut rows = stmt.query([memory_id])?;
         if let Some(row) = rows.next()? {
             let cid: Option<String> = row.get(0)?;
@@ -222,9 +230,9 @@ impl Memory {
 
     /// Return all `memory_id`s that match an exact `(lobe, key)`.
     pub fn find_by_lobe_key(&self, lobe: &str, key: &str) -> Result<Vec<String>> {
-        let mut stmt =
-            self.db
-                .prepare("SELECT memory_id FROM memories WHERE lobe=?1 AND key=?2")?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT memory_id FROM memories WHERE lobe=?1 AND key=?2")?;
         let iter = stmt.query_map((lobe, key), |row| row.get::<_, String>(0))?;
         Ok(iter.filter_map(|r| r.ok()).collect())
     }
@@ -404,7 +412,9 @@ impl Memory {
         }
         drop(stmt);
 
-        if to_delete.is_empty() { return Ok(0); }
+        if to_delete.is_empty() {
+            return Ok(0);
+        }
 
         let tx = self.db.unchecked_transaction()?;
         let mut del = tx.prepare("DELETE FROM memories WHERE memory_id=?1")?;
@@ -437,7 +447,11 @@ impl Memory {
 
     /// Append a new immutable snapshot to a named path and advance its head.
     /// Returns the new snapshot id (blake3 hex).
-    pub fn extend_path(&self, path_name: &str, state: crate::memory::dag::MemoryState) -> Result<String> {
+    pub fn extend_path(
+        &self,
+        path_name: &str,
+        state: crate::memory::dag::MemoryState,
+    ) -> Result<String> {
         crate::memory::dag::extend_path(path_name, state)
     }
 

@@ -1,4 +1,4 @@
-use crate::types::{MoralContract, ContractRule};
+use crate::types::{ContractRule, MoralContract};
 use serde::Serialize;
 use std::{collections::HashSet, fs};
 use toml;
@@ -31,7 +31,9 @@ fn norm(s: &str) -> String {
     // lowercase; skip control / zero-width
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
-        if ch.is_control() { continue; }
+        if ch.is_control() {
+            continue;
+        }
         match ch {
             '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
             _ => out.push(ch.to_ascii_lowercase()),
@@ -43,14 +45,13 @@ fn norm(s: &str) -> String {
 fn severity_rank(s: Option<&str>) -> i32 {
     match s {
         Some(sev) if sev.eq_ignore_ascii_case("critical") => 4,
-        Some(sev) if sev.eq_ignore_ascii_case("high")     => 3,
-        Some(sev) if sev.eq_ignore_ascii_case("medium")   => 2,
-        Some(sev) if sev.eq_ignore_ascii_case("low")      => 1,
-        Some(sev) if sev.eq_ignore_ascii_case("none")     => 0,
+        Some(sev) if sev.eq_ignore_ascii_case("high") => 3,
+        Some(sev) if sev.eq_ignore_ascii_case("medium") => 2,
+        Some(sev) if sev.eq_ignore_ascii_case("low") => 1,
+        Some(sev) if sev.eq_ignore_ascii_case("none") => 0,
         _ => 0,
     }
 }
-
 
 fn rule_matches(rule: &ContractRule, text: &str) -> bool {
     let t = norm(text);
@@ -97,7 +98,11 @@ pub fn evaluate_input_against_rules(input: &str, contract: &MoralContract) -> Ev
     for rule in &contract.rules {
         let eff = rule.effect.as_deref().unwrap_or("");
         let is_allow = eff.eq_ignore_ascii_case("allow")
-            || rule.severity.as_deref().map(|s| s.eq_ignore_ascii_case("none")).unwrap_or(false)
+            || rule
+                .severity
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("none"))
+                .unwrap_or(false)
             || eff.eq_ignore_ascii_case("allow_with_constraints");
 
         if is_allow && rule_matches(rule, input) {
@@ -122,9 +127,15 @@ pub fn evaluate_input_against_rules(input: &str, contract: &MoralContract) -> Ev
         // Skip allow rules in violation pass
         let eff = rule.effect.as_deref().unwrap_or("");
         let is_allow = eff.eq_ignore_ascii_case("allow")
-            || rule.severity.as_deref().map(|s| s.eq_ignore_ascii_case("none")).unwrap_or(false)
+            || rule
+                .severity
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("none"))
+                .unwrap_or(false)
             || eff.eq_ignore_ascii_case("allow_with_constraints");
-        if is_allow { continue; }
+        if is_allow {
+            continue;
+        }
 
         if rule_matches(rule, input) {
             extend_constraints(&mut constraints, rule);
@@ -150,9 +161,19 @@ pub fn evaluate_input_against_rules(input: &str, contract: &MoralContract) -> Ev
 
     for (i, r) in violations.iter().enumerate() {
         let rank = severity_rank(r.severity.as_deref());
-        let spec = if r.matches_any.as_ref().map(|v| !v.is_empty()).unwrap_or(false) {
+        let spec = if r
+            .matches_any
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             3
-        } else if r.contains_any.as_ref().map(|v| !v.is_empty()).unwrap_or(false) {
+        } else if r
+            .contains_any
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             2
         } else if !r.contains.is_empty() {
             1

@@ -3,10 +3,9 @@
 
 use serde_json::json;
 
+use crate::commands::init::ensure_initialized_once;
 use crate::services::audit::{
-    ContractEvalMeta,
-    evaluate_and_audit_contract,
-    record_ethics_decision,
+    ContractEvalMeta, evaluate_and_audit_contract, record_ethics_decision,
 };
 
 /// Verdict returned by [`precheck`]: normalized signal from contracts.
@@ -18,15 +17,18 @@ use crate::services::audit::{
 /// - `reason` — human-readable rationale from the ethics contract
 #[derive(Debug, Clone)]
 pub struct EthosVerdict {
-    pub risk: String,            
+    pub risk: String,
     pub constraints: Vec<String>,
     pub passed: bool,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision { Allow, AllowWithConstraints, Block }
-
+pub enum Decision {
+    Allow,
+    AllowWithConstraints,
+    Block,
+}
 
 /// Synchronous, contract-backed risk + ethics check.
 ///
@@ -44,6 +46,15 @@ pub enum Decision { Allow, AllowWithConstraints, Block }
 /// * Writes a normalized ethics decision entry to the logbook via [`record_ethics_decision`].
 /// * Also logs the raw contract evaluations (risk + ethics) via [`evaluate_and_audit_contract`].
 pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict, String> {
+    if !ethos_enabled() {
+        return Ok(EthosVerdict {
+            risk: "Low".to_string(),
+            constraints: Vec::new(),
+            passed: true,
+            reason: "ethos_disabled".to_string(),
+        });
+    }
+
     // 1) Risk assessment
     let risk_val = evaluate_and_audit_contract(
         &ContractEvalMeta {
@@ -98,12 +109,16 @@ pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict
         for v in arr {
             if let Some(sev) = v.get("severity").and_then(|s| s.as_str()) {
                 let r = sev_rank(sev);
-                if r > effective_rank { effective_rank = r; }
+                if r > effective_rank {
+                    effective_rank = r;
+                }
             }
         }
     }
     // If we blocked but still somehow have Low, bump to at least High to reflect violation gravity
-    if !passed && effective_rank == 0 { effective_rank = 3; }
+    if !passed && effective_rank == 0 {
+        effective_rank = 3;
+    }
     let risk = rank_to_label(effective_rank).to_string();
     let constraints = ethics_val["constraints"]
         .as_array()
@@ -114,7 +129,18 @@ pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict
 
     record_ethics_decision(intent_label, passed, &risk, &constraints, &reason);
 
-    Ok(EthosVerdict { risk, constraints, passed, reason })
+    Ok(EthosVerdict {
+        risk,
+        constraints,
+        passed,
+        reason,
+    })
+}
+
+fn ethos_enabled() -> bool {
+    ensure_initialized_once()
+        .map(|report| report.config.services.ethos_enabled)
+        .unwrap_or(true)
 }
 
 /// Map an [`EthosVerdict`] into an actionable gate decision.

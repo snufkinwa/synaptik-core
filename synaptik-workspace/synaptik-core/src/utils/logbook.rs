@@ -12,7 +12,13 @@ struct LogLine<'a> {
     content_preview: String,
 }
 
-pub fn append_log(base: &Path, id: &str, ts_rfc3339: &str, event: &str, content: &str) -> Result<()> {
+pub fn append_log(
+    base: &Path,
+    id: &str,
+    ts_rfc3339: &str,
+    event: &str,
+    content: &str,
+) -> Result<()> {
     let log_path = base.join("logbook.jsonl");
     let preview = content.chars().take(120).collect::<String>();
     let line = LogLine {
@@ -22,7 +28,10 @@ pub fn append_log(base: &Path, id: &str, ts_rfc3339: &str, event: &str, content:
         content_preview: preview,
     };
     let json = serde_json::to_string(&line)?;
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(log_path)?;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
     writeln!(f, "{}", json)?;
     Ok(())
 }
@@ -35,7 +44,10 @@ pub fn emit_event(base: &Path, event: &str, data: Value, ts: &str) -> Result<()>
         "data": data
     });
     let json = serde_json::to_string(&line)?;
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(log_path)?;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
     writeln!(f, "{}", json)?;
     Ok(())
 }

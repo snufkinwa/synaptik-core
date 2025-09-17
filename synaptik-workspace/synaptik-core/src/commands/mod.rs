@@ -1,13 +1,12 @@
 // src/commands/mod.rs
-pub mod init;           
-mod api;                
+mod api;
+pub mod init;
 
 use serde::Serialize;
 
-
 #[derive(Debug, Clone, Copy)]
 pub enum Prefer {
-    Auto,    
+    Auto,
     Hot,
     Archive,
     Dag,

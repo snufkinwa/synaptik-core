@@ -2,18 +2,22 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use once_cell::sync::OnceCell;              
+use once_cell::sync::OnceCell;
+use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use contracts::assets::write_default_contracts;
 
+use crate::config::{CoreConfig, LogbookConfig};
+
 #[derive(Debug, Clone)]
 pub struct InitReport {
     pub root: PathBuf,
     pub created: Vec<String>,
     pub existed: Vec<String>,
+    pub config: CoreConfig,
 }
 
 // ---------- single global init gate ----------
@@ -42,12 +46,6 @@ pub fn ensure_initialized() -> Result<InitReport> {
 
     // Directories
     ensure_dir(&root, "", &mut created, &mut existed)?;
-    ensure_dir(&root, "contracts", &mut created, &mut existed)?;
-    ensure_dir(&root, "cache", &mut created, &mut existed)?;
-    ensure_dir(&root, "dag", &mut created, &mut existed)?;
-    ensure_dir(&root, "archive", &mut created, &mut existed)?;
-    ensure_dir(&root.join("archive"), "objects", &mut created, &mut existed)?;
-    ensure_dir(&root, "logbook", &mut created, &mut existed)?;
     ensure_dir(&root, "refs", &mut created, &mut existed)?;
 
     // HEAD ref (Git-like)
@@ -68,16 +66,32 @@ pub fn ensure_initialized() -> Result<InitReport> {
         &mut existed,
     )?;
 
-    // Contract dir
-    ensure_dir(&root, "contracts", &mut created, &mut existed)?;
+    // Load configuration (relative paths are resolved against root)
+    let config = CoreConfig::load(&root)?;
+
+    // Derived directories from config
+    ensure_parent_dir_abs(&config.memory.cache_path, &mut created, &mut existed)?;
+    ensure_dir_abs(&config.memory.dag_path, &mut created, &mut existed)?;
+    ensure_dir_abs(&config.memory.archive_path, &mut created, &mut existed)?;
+    ensure_dir_abs(
+        &config.memory.archive_path.join("objects"),
+        &mut created,
+        &mut existed,
+    )?;
+    ensure_dir_abs(&config.contracts.path, &mut created, &mut existed)?;
 
     // Seed default contracts from the contracts crate (idempotent)
-    let _ = write_default_contracts(root.join("contracts"));
+    let _ = write_default_contracts(&config.contracts.path);
 
     // Logbook schema (per-stream JSONL files)
-    initialize_logbook_files(&root, &mut created, &mut existed)?;
+    initialize_logbook_files(&config.logbook, &mut created, &mut existed)?;
 
-    Ok(InitReport { root, created, existed })
+    Ok(InitReport {
+        root,
+        created,
+        existed,
+        config,
+    })
 }
 
 fn ensure_dir(
@@ -86,13 +100,25 @@ fn ensure_dir(
     created: &mut Vec<String>,
     existed: &mut Vec<String>,
 ) -> Result<()> {
-    let p = if rel.is_empty() { base.to_path_buf() } else { base.join(rel) };
+    let p = if rel.is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(rel)
+    };
     if p.exists() {
-        existed.push(if rel.is_empty() { ".".to_string() } else { rel.to_string() });
+        existed.push(if rel.is_empty() {
+            ".".to_string()
+        } else {
+            rel.to_string()
+        });
         return Ok(());
     }
     fs::create_dir_all(&p).with_context(|| format!("create_dir_all({:?})", p))?;
-    created.push(if rel.is_empty() { ".".to_string() } else { rel.to_string() });
+    created.push(if rel.is_empty() {
+        ".".to_string()
+    } else {
+        rel.to_string()
+    });
     Ok(())
 }
 
@@ -136,48 +162,78 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn ensure_seeded_jsonl(
-    dir: &Path,
-    file: &str,
-    init_line: &str,
-    created: &mut Vec<String>,
-    existed: &mut Vec<String>,
-) -> Result<()> {
-    let p = dir.join(file);
-    if !p.exists() {
-        ensure_file(dir, file, Some(&(init_line.to_string() + "\n")), created, existed)?;
-        return Ok(());
-    }
-    existed.push(file.to_string());
-    // If exists but empty, seed it
-    if fs::metadata(&p)?.len() == 0 {
-        let mut f = OpenOptions::new().append(true).open(&p)?;
-        f.write_all(init_line.as_bytes())?;
-        f.write_all(b"\n")?;
-    }
-    Ok(())
-}
-
 fn initialize_logbook_files(
-    root: &Path,
+    log_cfg: &LogbookConfig,
     created: &mut Vec<String>,
     existed: &mut Vec<String>,
 ) -> Result<()> {
     let ts = Utc::now().to_rfc3339();
-    let init_event = format!(
-        r#"{{"ts":"{}","event":"system_init","agent":"system","data":{{"version":"1.0.0","architecture":"hybrid_tiered"}}}}"#,
-        ts
-    );
+    let init_event = json!({
+        "ts": ts,
+        "event": "system_init",
+        "agent": "system",
+        "data": {
+            "version": "1.0.0",
+            "architecture": "hybrid_tiered"
+        }
+    })
+    .to_string();
 
-    // aggregate
-    ensure_seeded_jsonl(root, "logbook.jsonl", &init_event, created, existed)?;
+    ensure_dir_abs(&log_cfg.path, created, existed)?;
+    ensure_seeded_jsonl_abs(&log_cfg.aggregate, &init_event, created, existed)?;
+    ensure_seeded_jsonl_abs(&log_cfg.ethics_log, &init_event, created, existed)?;
+    ensure_seeded_jsonl_abs(&log_cfg.agent_actions, &init_event, created, existed)?;
+    ensure_seeded_jsonl_abs(&log_cfg.contract_violations, &init_event, created, existed)?;
+    ensure_seeded_jsonl_abs(&log_cfg.contracts_log, &init_event, created, existed)?;
+    Ok(())
+}
 
-    // per-stream
-    let log_dir = root.join("logbook");
-    ensure_dir(root, "logbook", created, existed)?;
-    ensure_seeded_jsonl(&log_dir, "ethics.jsonl", &init_event, created, existed)?;
-    ensure_seeded_jsonl(&log_dir, "actions.jsonl", &init_event, created, existed)?;
-    ensure_seeded_jsonl(&log_dir, "violations.jsonl", &init_event, created, existed)?;
+fn ensure_dir_abs(path: &Path, created: &mut Vec<String>, existed: &mut Vec<String>) -> Result<()> {
+    if path.exists() {
+        existed.push(path.display().to_string());
+        return Ok(());
+    }
+    fs::create_dir_all(path).with_context(|| format!("create_dir_all({:?})", path))?;
+    created.push(path.display().to_string());
+    Ok(())
+}
+
+fn ensure_parent_dir_abs(
+    path: &Path,
+    created: &mut Vec<String>,
+    existed: &mut Vec<String>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_dir_abs(parent, created, existed)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_seeded_jsonl_abs(
+    path: &Path,
+    init_line: &str,
+    created: &mut Vec<String>,
+    existed: &mut Vec<String>,
+) -> Result<()> {
+    if path.exists() {
+        existed.push(path.display().to_string());
+        if fs::metadata(path)?.len() == 0 {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(path)
+                .with_context(|| format!("Failed to open {:?} for appending", path))?;
+            f.write_all(init_line.as_bytes())?;
+            f.write_all(b"\n")?;
+            f.flush()?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create_dir_all({:?})", parent))?;
+    }
+    write_atomic(path, format!("{}\n", init_line).as_bytes())?;
+    created.push(path.display().to_string());
     Ok(())
 }
 
@@ -189,15 +245,17 @@ name = "cogniv"
 version = "0.1.0"
 
 [memory]
-cache_path = ".cogniv/cache/memory.db"
-dag_path   = ".cogniv/dag"
+cache_path = "cache/memory.db"
+dag_path   = "dag"
+archive_path = "archive"
 
 [logbook]
-path               = ".cogniv/logbook"
-aggregate          = ".cogniv/logbook.jsonl"
-ethics_log         = ".cogniv/logbook/ethics.jsonl"
-agent_actions      = ".cogniv/logbook/actions.jsonl"
-contract_violations = ".cogniv/logbook/violations.jsonl"
+path               = "logbook"
+aggregate          = "logbook.jsonl"
+ethics_log         = "logbook/ethics.jsonl"
+agent_actions      = "logbook/actions.jsonl"
+contract_violations = "logbook/violations.jsonl"
+contracts_log      = "logbook/contracts.jsonl"
 
 [services]
 ethos_enabled     = true
@@ -205,7 +263,7 @@ librarian_enabled = true
 audit_enabled     = true
 
 [contracts]
-path            = ".cogniv/contracts"
+path            = "contracts"
 default_contract = "nonviolence.toml"
 
 [cache]
@@ -213,4 +271,13 @@ max_hot_memory_mb = 50
 
 [audit]
 retention_days = 365
+
+[policies]
+promote_hot_threshold = 5
+auto_prune_duplicates = true
+reflection_min_count = 3
+reflection_max_keywords = 3
+reflection_pool_size = 20
+summary_min_len = 500
+log_preview_len = 160
 "#;
