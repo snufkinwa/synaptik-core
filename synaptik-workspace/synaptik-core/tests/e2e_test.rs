@@ -10,12 +10,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{thread, time::Duration};
 
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use synaptik_core::commands::Commands;
 use synaptik_core::services::archivist::Archivist;
 use synaptik_core::services::librarian::{Librarian, LibrarianSettings};
 use synaptik_core::services::memory::Memory;
+use synaptik_core::utils::pons::PonsStore;
 
 use synaptik_core::commands::ensure_initialized_once;
 
@@ -1006,6 +1007,49 @@ fn dag_writes_are_consistent() -> anyhow::Result<()> {
     // 7) Validate archive object exists for cid
     let arch_path = report.config.memory.archive_path.join(&cid);
     assert!(arch_path.exists(), "archive object must exist for cid");
+
+    Ok(())
+}
+
+/// Pons store should write bytes + metadata and round-trip via latest helpers.
+#[test]
+fn pons_store_roundtrip_bytes_and_meta() -> anyhow::Result<()> {
+    let report = ensure_initialized_once().expect("init");
+    let root = report.root.clone();
+
+    let store = PonsStore::open(&root)?;
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pons = format!("vision_test_{ns}");
+    store.create_pons(&pons)?;
+
+    let key = "frames/front/capture.png";
+    let payload: Vec<u8> = b"synthetic frame bytes".to_vec();
+    let extra = json!({
+        "camera": "front",
+        "exposure": 0.0025,
+    });
+
+    let (obj_ref, data_path) =
+        store.put_object_with_meta(&pons, key, &payload, Some("image/png"), Some(extra.clone()))?;
+
+    assert!(data_path.exists(), "payload file should exist on disk");
+    assert_eq!(obj_ref.pons, pons);
+    assert_eq!(obj_ref.key, key);
+    assert_eq!(obj_ref.size_bytes as usize, payload.len());
+
+    let latest_bytes = store.get_object_latest(&pons, key)?;
+    assert_eq!(latest_bytes, payload);
+
+    let latest_ref = store.get_object_latest_ref(&pons, key)?;
+    assert_eq!(latest_ref, obj_ref);
+
+    let (version_bytes, meta) = store.get_object_version_with_meta(&pons, key, &obj_ref.version)?;
+    assert_eq!(version_bytes, payload);
+    assert_eq!(meta.media_type.as_deref(), Some("image/png"));
+    assert_eq!(meta.extra, Some(extra));
 
     Ok(())
 }

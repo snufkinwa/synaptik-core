@@ -753,6 +753,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "chrono",
+ "contracts",
  "pyo3",
  "serde_json",
  "synaptik-core",

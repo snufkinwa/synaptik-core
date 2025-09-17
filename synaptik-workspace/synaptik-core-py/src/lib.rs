@@ -1,16 +1,18 @@
-use pyo3::prelude::PyAnyMethods;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList};
-use pyo3::PyTypeInfo;
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 
 use anyhow::anyhow;
 use blake3;
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 extern crate synaptik_core as syn_core;
+use contracts::types::MoralContract;
 use syn_core::commands::{Commands, EthosReport, HitSource, Prefer};
 use syn_core::memory::dag::MemoryState as DagMemoryState;
+use syn_core::services::streamgate::{GateDecision as CoreGateDecision, StreamGate as CoreStreamGate, StreamGateConfig, StreamingIndex};
+use syn_core::utils::pons::{ObjectMetadata as PonsMetadata, ObjectRef as PonsObjectRef};
 
 fn pyerr<E: std::fmt::Display>(e: E) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
@@ -107,6 +109,14 @@ fn json_to_py(py: Python<'_>, v: &Value) -> PyObject {
     }
 }
 
+fn json_array_to_py(py: Python<'_>, arr: &[Value]) -> PyObject {
+    let list = PyList::empty_bound(py);
+    for item in arr {
+        let _ = list.append(json_to_py(py, item));
+    }
+    list.into_any().into_py(py)
+}
+
 fn py_to_json(any: &Bound<'_, PyAny>) -> Value {
     if let Ok(b) = any.extract::<bool>() {
         return Value::Bool(b);
@@ -142,6 +152,48 @@ fn py_to_json(any: &Bound<'_, PyAny>) -> Value {
         return json!(s.to_string());
     }
     Value::Null
+}
+
+fn object_ref_to_py(py: Python<'_>, r: &PonsObjectRef) -> PyObject {
+    let d = PyDict::new_bound(py);
+    let _ = d.set_item("pons", &r.pons);
+    let _ = d.set_item("key", &r.key);
+    // Adjust field names if needed to match the actual struct
+    let _ = d.set_item("version", r.version.clone());
+    let _ = d.set_item("etag", r.etag.clone());
+    let _ = d.set_item("size_bytes", r.size_bytes);
+    d.into_any().into_py(py)
+}
+
+fn metadata_to_py(py: Python<'_>, meta: &PonsMetadata) -> PyObject {
+    let d = PyDict::new_bound(py);
+    let _ = d.set_item("media_type", meta.media_type.clone());
+    match &meta.extra {
+        Some(v) => {
+            let _ = d.set_item("extra", json_to_py(py, v));
+        }
+        None => {
+            let _ = d.set_item("extra", py.None());
+        }
+    }
+    d.into_any().into_py(py)
+}
+
+fn decision_to_py(decision: CoreGateDecision) -> PyGateDecision {
+    match decision {
+        CoreGateDecision::Pass => PyGateDecision {
+            kind: "Pass",
+            message: None,
+        },
+        CoreGateDecision::Hold => PyGateDecision {
+            kind: "Hold",
+            message: None,
+        },
+        CoreGateDecision::CutAndReplace(msg) => PyGateDecision {
+            kind: "CutAndReplace",
+            message: Some(msg),
+        },
+    }
 }
 
 #[pymethods]
@@ -260,6 +312,91 @@ impl PyCommands {
             out.append(d)?;
         }
         Ok(out.into_any().into_py(py))
+    }
+
+    fn pons_create(&self, name: &str) -> PyResult<()> {
+        self.inner.pons_create(name).map_err(pyerr)
+    }
+
+    #[pyo3(signature = (pons, key, data, media_type=None, extra=None))]
+    fn pons_put_object(
+        &self,
+        py: Python<'_>,
+        pons: &str,
+        key: &str,
+        data: &Bound<'_, PyAny>,
+        media_type: Option<&str>,
+        extra: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        let payload = if let Ok(bytes) = data.extract::<Vec<u8>>() {
+            bytes
+        } else if let Ok(bytes) = data.extract::<&[u8]>() {
+            bytes.to_vec()
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "data must be bytes or bytearray",
+            ));
+        };
+
+        let extra_json = extra.and_then(|v| {
+            let val = py_to_json(v);
+            if val.is_null() {
+                None
+            } else {
+                Some(val)
+            }
+        });
+
+        let obj = self
+            .inner
+            .pons_put_object(pons, key, &payload, media_type, extra_json)
+            .map_err(pyerr)?;
+        Ok(object_ref_to_py(py, &obj))
+    }
+
+    fn pons_get_latest_bytes(&self, py: Python<'_>, pons: &str, key: &str) -> PyResult<PyObject> {
+        let bytes = self.inner.pons_get_latest_bytes(pons, key).map_err(pyerr)?;
+        Ok(PyBytes::new_bound(py, &bytes).into_py(py))
+    }
+
+    fn pons_get_latest_ref(&self, py: Python<'_>, pons: &str, key: &str) -> PyResult<PyObject> {
+        let rf = self.inner.pons_get_latest_ref(pons, key).map_err(pyerr)?;
+        Ok(object_ref_to_py(py, &rf))
+    }
+
+    fn pons_get_version_with_meta(
+        &self,
+        py: Python<'_>,
+        pons: &str,
+        key: &str,
+        version: &str,
+    ) -> PyResult<(PyObject, PyObject)> {
+        let (bytes, meta) = self
+            .inner
+            .pons_get_version_with_meta(pons, key, version)
+            .map_err(pyerr)?;
+        let b = PyBytes::new_bound(py, &bytes).into_py(py);
+        let m = metadata_to_py(py, &meta);
+        Ok((b, m))
+    }
+
+    #[pyo3(signature = (pons, prefix=None, limit=20))]
+    fn pons_list_latest(
+        &self,
+        py: Python<'_>,
+        pons: &str,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> PyResult<Vec<PyObject>> {
+        let refs = self
+            .inner
+            .pons_list_latest(pons, prefix, limit)
+            .map_err(pyerr)?;
+        let mut out = Vec::with_capacity(refs.len());
+        for r in refs {
+            out.push(object_ref_to_py(py, &r));
+        }
+        Ok(out)
     }
 
     /// Stats dict: { total, archived, by_lobe: [(lobe, count)], last_updated }
@@ -400,13 +537,13 @@ impl PyCommands {
     fn trace_path(&self, py: Python<'_>, path_name: &str, limit: usize) -> PyResult<PyObject> {
         let norm = sanitize_name(path_name);
         let v = self.inner.dag_trace_path(&norm, limit).map_err(pyerr)?;
-        Ok(json_to_py(py, &serde_json::Value::Array(v)))
+    Ok(json_array_to_py(py, &v))
     }
 
     /// Flatten + de-dup provenance sources for a snapshot. Returns list[dict].
     fn cite_sources(&self, py: Python<'_>, snapshot_id: &str) -> PyResult<PyObject> {
         let v = self.inner.dag_cite_sources(snapshot_id).map_err(pyerr)?;
-        Ok(json_to_py(py, &serde_json::Value::Array(v)))
+    Ok(json_array_to_py(py, &v))
     }
 
     // Note: duplicate pruning is automated in the Rust core during writes.
@@ -606,16 +743,75 @@ impl PyCommands {
     #[pyo3(signature = (query, limit=50))]
     fn dag_search_content(&self, py: Python<'_>, query: &str, limit: usize) -> PyResult<PyObject> {
         let v = self.inner.dag_search_content(query, limit).map_err(pyerr)?;
-        Ok(json_to_py(py, &serde_json::Value::Array(v)))
+    Ok(json_array_to_py(py, &v))
+    }
+}
+
+#[pyclass(name = "GateDecision")]
+struct PyGateDecision {
+    #[pyo3(get)]
+    kind: &'static str,
+    #[pyo3(get)]
+    message: Option<String>,
+}
+
+#[pyclass(name = "StreamGate")]
+struct PyStreamGate {
+    #[allow(dead_code)]
+    index: Arc<StreamingIndex>,
+    gate: CoreStreamGate,
+}
+
+
+
+#[pymethods]
+impl PyStreamGate {
+    #[new]
+    #[pyo3(
+        signature = (contract_json, action, budget_ms=5_000, window_bytes=65_536, fail_closed_on_finalize=true)
+    )]
+    fn new(
+        contract_json: &str,
+        action: &str,
+        budget_ms: u64,
+        window_bytes: usize,
+        fail_closed_on_finalize: bool,
+    ) -> PyResult<Self> {
+        let contract: MoralContract = serde_json::from_str(contract_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        // If StreamingIndex::from_contract_for_action takes &MoralContract, pass &contract
+        let index = StreamingIndex::from_contract_for_action(contract, action).map_err(pyerr)?;
+        let arc = Arc::new(index);
+        let gate = CoreStreamGate::from_index(
+            arc.clone(),
+            StreamGateConfig {
+                budget_ms,
+                window_bytes,
+                fail_closed_on_finalize,
+            },
+        );
+        Ok(Self { index: arc, gate })
+    }
+
+    /// Push a chunk of text to the stream gate. Returns a GateDecision (Pass/Hold/CutAndReplace).
+    fn push(&mut self, chunk: &str) -> PyResult<PyGateDecision> {
+        Ok(decision_to_py(self.gate.push(chunk)))
+    }
+
+    /// Finalize the stream. Returns a GateDecision (Pass/Hold/CutAndReplace).
+    fn finalize(&mut self) -> PyResult<PyGateDecision> {
+        Ok(decision_to_py(self.gate.finalize()))
     }
 }
 
 #[pymodule]
 fn synaptik_core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     if let Err(e) = syn_core::commands::init::ensure_initialized_once() {
-        let cat = pyo3::exceptions::PyRuntimeWarning::type_object_bound(py);
-        PyErr::warn_bound(py, &cat, &format!("Init warning: {e}"), 0)?;
+    let cat = py.get_type_bound::<pyo3::exceptions::PyRuntimeWarning>();
+    PyErr::warn_bound(py, &cat, &format!("Init warning: {e}"), 0)?;
     }
     m.add_class::<PyCommands>()?;
+    m.add_class::<PyStreamGate>()?;
+    m.add_class::<PyGateDecision>()?;
     Ok(())
 }

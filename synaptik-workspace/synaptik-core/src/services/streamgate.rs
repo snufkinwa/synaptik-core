@@ -1,0 +1,245 @@
+// synaptik-core/src/services/streamgate.rs
+
+use anyhow::Result;
+use contracts::types::{ContractRule, MoralContract};
+use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    Pass,
+    Hold,
+    CutAndReplace(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamGateConfig {
+    pub budget_ms: u64,
+    pub window_bytes: usize,
+    pub fail_closed_on_finalize: bool,
+}
+
+fn norm(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        // lowercase and drop control / zero-width
+        if ch.is_control() {
+            continue;
+        }
+        let lc = ch.to_ascii_lowercase();
+        match lc {
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
+            _ => out.push(lc),
+        }
+    }
+    out
+}
+
+/// Minimal evaluation result to satisfy your debug test
+#[derive(Debug, Clone)]
+pub struct EvalResult {
+    pub passed: bool,
+    pub violated_rules: Vec<ContractRule>,
+}
+
+#[derive(Debug)]
+pub struct StreamingIndex {
+    _action: String,
+    idiom_allowlist: Vec<String>, // from matches_any with effect=allow
+    rules_for_action: Vec<ContractRule>, // all rules with this action
+}
+
+impl StreamingIndex {
+    pub fn from_contract_for_action(contract: MoralContract, action: &str) -> Result<Self> {
+        let mut idioms = Vec::new();
+        let mut rules = Vec::new();
+
+        for r in contract.rules.into_iter() {
+            if !r.action.eq_ignore_ascii_case(action) {
+                continue;
+            }
+
+            // Collect allowlist idioms from matches_any when effect == Some("allow")
+            if r.effect
+                .as_deref()
+                .map(|e| e.eq_ignore_ascii_case("allow"))
+                .unwrap_or(false)
+            {
+                if let Some(list) = &r.matches_any {
+                    for m in list {
+                        let n = norm(m);
+                        if !n.is_empty() {
+                            idioms.push(n);
+                        }
+                    }
+                }
+            }
+
+            rules.push(r);
+        }
+
+        Ok(Self {
+            _action: action.to_string(),
+            idiom_allowlist: idioms,
+            rules_for_action: rules,
+        })
+    }
+
+    /// Public: used by your debug test
+    pub fn evaluate_chunk(&self, text: &str) -> EvalResult {
+        let ntext = norm(text);
+
+        // idiom allowlist = pass
+        for idiom in &self.idiom_allowlist {
+            if ntext.contains(idiom) {
+                return EvalResult {
+                    passed: true,
+                    violated_rules: vec![],
+                };
+            }
+        }
+
+        let mut violated = Vec::new();
+
+        for r in &self.rules_for_action {
+            // matches_any (exact substring)
+            if let Some(list) = &r.matches_any {
+                for m in list {
+                    if !m.is_empty() && ntext.contains(&norm(m)) {
+                        violated.push(r.clone());
+                        break;
+                    }
+                }
+            }
+            // contains_any (legacy-ish, treat as substring too)
+            if let Some(list) = &r.contains_any {
+                for m in list {
+                    if !m.is_empty() && ntext.contains(&norm(m)) {
+                        violated.push(r.clone());
+                        break;
+                    }
+                }
+            }
+            // legacy `contains` vector (keep compatibility)
+            if !r.contains.is_empty() {
+                for m in &r.contains {
+                    if !m.is_empty() && ntext.contains(&norm(m)) {
+                        violated.push(r.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        EvalResult {
+            passed: violated.is_empty(),
+            violated_rules: violated,
+        }
+    }
+
+    /// Public: used by your debug test
+    pub fn has_pronouns(&self, text: &str) -> bool {
+        let t = norm(text);
+        // simple pronoun heuristic for “personal threat”
+        let pronouns = [
+            "him ", " her ", " them ", " you ", " your ", " his ", " their ", " my ", " me ",
+            " she ", " he ",
+        ];
+        // also check end-of-text cases by padding spaces
+        let padded = format!(" {} ", t);
+        pronouns.iter().any(|p| padded.contains(p))
+    }
+
+    /// Is the violation a high-severity personal threat (needs pronouns)
+    fn is_personal_threat(&self, rule: &ContractRule, text: &str) -> bool {
+        let is_high = rule
+            .severity
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("high"))
+            .unwrap_or(false);
+        if !is_high {
+            return false;
+        }
+        self.has_pronouns(text)
+    }
+
+    /// Get a suggestion string to use when cutting.
+    fn suggestion_for(&self, violated: &[ContractRule]) -> String {
+        // first available action_suggestion, else generic
+        for r in violated {
+            if let Some(s) = &r.action_suggestion {
+                if !s.trim().is_empty() {
+                    return s.clone();
+                }
+            }
+        }
+        "I won't help with harm. Let’s discuss something constructive.".to_string()
+    }
+}
+
+pub struct StreamGate {
+    index: Arc<StreamingIndex>,
+    _cfg: StreamGateConfig,
+    saw_violation: bool, // any non-idiom violation seen
+    is_held: bool,       // streaming hold
+    pending_cut_msg: Option<String>,
+}
+
+impl StreamGate {
+    pub fn from_index(index: Arc<StreamingIndex>, cfg: StreamGateConfig) -> Self {
+        Self {
+            index,
+            _cfg: cfg,
+            saw_violation: false,
+            is_held: false,
+            pending_cut_msg: None,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &str) -> GateDecision {
+        // budget/window enforcement can be added later; no-op for now
+
+        // Evaluate this chunk
+        let eval = self.index.evaluate_chunk(chunk);
+        if eval.passed {
+            // If we were already holding, keep holding (don’t flicker)
+            return if self.is_held {
+                GateDecision::Hold
+            } else {
+                GateDecision::Pass
+            };
+        }
+
+        // There are violated rules. Decide:
+        // If any is a personal threat (high severity + pronouns), cut immediately
+        if eval
+            .violated_rules
+            .iter()
+            .any(|r| self.index.is_personal_threat(r, chunk))
+        {
+            let suggestion = self.index.suggestion_for(&eval.violated_rules);
+            self.pending_cut_msg = Some(suggestion.clone());
+            self.saw_violation = true;
+            // no need to set is_held; we’re cutting right now
+            return GateDecision::CutAndReplace(suggestion);
+        }
+
+        // Otherwise: generic harm -> HOLD now, CUT at finalize
+        self.saw_violation = true;
+        self.is_held = true;
+        GateDecision::Hold
+    }
+
+    pub fn finalize(&mut self) -> GateDecision {
+        if self.saw_violation {
+            // If we have a suggestion from earlier, reuse; else derive from rules
+            let msg = self.pending_cut_msg.take().unwrap_or_else(|| {
+                // Create a generic suggestion when we didn’t cut immediately
+                "I can’t assist with harm. Let’s switch to a safe, constructive topic.".to_string()
+            });
+            return GateDecision::CutAndReplace(msg);
+        }
+
+        // No violations observed
+        GateDecision::Pass
+    }
+}

@@ -13,6 +13,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::json;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::memory::dag;
 
@@ -37,6 +38,8 @@ impl Memory {
 
         let db =
             Connection::open(db_path).with_context(|| format!("opening sqlite at {}", db_path))?;
+
+        db.busy_timeout(Duration::from_secs(5))?;
 
         // WAL reduces writer/reader blocking; safe for our single-writer design.
         db.execute_batch(

@@ -47,6 +47,7 @@ pub fn ensure_initialized() -> Result<InitReport> {
     // Directories
     ensure_dir(&root, "", &mut created, &mut existed)?;
     ensure_dir(&root, "refs", &mut created, &mut existed)?;
+    ensure_dir(&root, "objects", &mut created, &mut existed)?;
 
     // HEAD ref (Git-like)
     ensure_file(

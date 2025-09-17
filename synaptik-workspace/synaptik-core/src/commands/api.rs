@@ -2,6 +2,7 @@
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 use crate::config::CoreConfig;
 use crate::memory::dag::MemoryState as DagMemoryState;
@@ -10,6 +11,7 @@ use crate::services::audit::{lock_contracts, record_action, unlock_contracts};
 use crate::services::ethos::{Decision, decision_gate, precheck};
 use crate::services::librarian::{Librarian, LibrarianSettings};
 use crate::services::memory::Memory;
+use crate::utils::pons::{ObjectMetadata as PonsMetadata, ObjectRef as PonsObjectRef, PonsStore};
 
 use crate::commands::init::ensure_initialized_once;
 use crate::commands::{HitSource, Prefer, RecallResult, bytes_to_string_owned};
@@ -18,6 +20,7 @@ pub struct Commands {
     memory: Memory,       // one SQLite connection here
     librarian: Librarian, // no DB inside
     config: CoreConfig,
+    root: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,6 +38,7 @@ pub struct CommandsBuilder {
     memory: Option<Memory>,
     archivist: Option<Archivist>,
     librarian: Option<Librarian>,
+    root: PathBuf,
 }
 
 impl CommandsBuilder {
@@ -45,6 +49,7 @@ impl CommandsBuilder {
             memory: None,
             archivist: None,
             librarian: None,
+            root: report.root.clone(),
         })
     }
 
@@ -103,11 +108,16 @@ impl CommandsBuilder {
             memory,
             librarian,
             config: self.config,
+            root: self.root.clone(),
         })
     }
 }
 
 impl Commands {
+    fn pons_store(&self) -> Result<PonsStore> {
+        PonsStore::open(self.root.clone())
+    }
+
     // -------------------- Path/name helpers --------------------
 
     fn normalize_path_name(&self, name: &str) -> String {
@@ -146,6 +156,60 @@ impl Commands {
 
     pub fn config(&self) -> &CoreConfig {
         &self.config
+    }
+
+    /// Ensure a pons namespace exists under the shared root.
+    pub fn pons_create(&self, pons: &str) -> Result<()> {
+        let store = self.pons_store()?;
+        store.create_pons(pons)
+    }
+
+    /// Write bytes plus optional metadata into a pons/key stream.
+    pub fn pons_put_object(
+        &self,
+        pons: &str,
+        key: &str,
+        data: &[u8],
+        media_type: Option<&str>,
+        extra: Option<Value>,
+    ) -> Result<PonsObjectRef> {
+        let store = self.pons_store()?;
+        let (obj, _) = store.put_object_with_meta(pons, key, data, media_type, extra)?;
+        Ok(obj)
+    }
+
+    /// Read newest bytes for a pons/key.
+    pub fn pons_get_latest_bytes(&self, pons: &str, key: &str) -> Result<Vec<u8>> {
+        let store = self.pons_store()?;
+        store.get_object_latest(pons, key)
+    }
+
+    /// Fetch newest ObjectRef for a pons/key.
+    pub fn pons_get_latest_ref(&self, pons: &str, key: &str) -> Result<PonsObjectRef> {
+        let store = self.pons_store()?;
+        store.get_object_latest_ref(pons, key)
+    }
+
+    /// Fetch a specific version's bytes and metadata.
+    pub fn pons_get_version_with_meta(
+        &self,
+        pons: &str,
+        key: &str,
+        version: &str,
+    ) -> Result<(Vec<u8>, PonsMetadata)> {
+        let store = self.pons_store()?;
+        store.get_object_version_with_meta(pons, key, version)
+    }
+
+    /// List the latest refs under a pons namespace.
+    pub fn pons_list_latest(
+        &self,
+        pons: &str,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PonsObjectRef>> {
+        let store = self.pons_store()?;
+        store.list_latest(pons, prefix, limit)
     }
 
     /// Gate arbitrary text with Ethos (for normal chat).
