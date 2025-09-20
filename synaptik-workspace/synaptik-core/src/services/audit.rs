@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::commands::init::ensure_initialized_once;
 use crate::config::{CoreConfig, PoliciesConfig};
+use crate::services::ethos::{Proposal, RuntimeDecision};
 use contracts::assets::{read_verified_or_embedded, write_default_contracts};
 use contracts::{MoralContract, evaluate_input_against_rules};
 // ----------- Logbook paths -----------
@@ -161,6 +162,35 @@ pub fn record_action(agent: &str, action: &str, details: &Value, severity: &str)
         "details": details
     });
     append_jsonl(&log_paths().actions, &entry);
+}
+
+/// Log a proposal and the decision outcome as a single audit action.
+pub fn log_proposal(p: &Proposal, decision: &RuntimeDecision) {
+    let details = json!({
+        "intent": p.intent,
+        "tools_requested": p.tools_requested,
+        "decision": decision,
+    });
+    record_action("streamruntime", "proposal", &details, "low");
+}
+
+/// Log an escalation decision.
+pub fn log_escalation(p: &Proposal, reason: &str) {
+    let details = json!({
+        "intent": p.intent,
+        "reason": reason,
+    });
+    record_action("streamruntime", "escalate", &details, "high");
+}
+
+/// Log a streaming violation or early stop
+pub fn log_violation(p: &Proposal, label: &str, preview: &str) {
+    let details = json!({
+        "intent": p.intent,
+        "violation": label,
+        "preview": redact_preview(preview),
+    });
+    record_action("streamruntime", "violation", &details, "medium");
 }
 
 /// Evaluate a contract via the **contracts** package and **log** the evaluation.

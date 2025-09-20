@@ -9,6 +9,11 @@ use crate::memory::dag::MemoryState as DagMemoryState;
 use crate::services::archivist::Archivist;
 use crate::services::audit::{lock_contracts, record_action, unlock_contracts};
 use crate::services::ethos::{Decision, decision_gate, precheck};
+use crate::services::{
+    FinalizedStatus, LlmClient, StreamRuntime,
+};
+use crate::services::ethos::{ContractsDecider, Proposal};
+use crate::services::audit as audit_svc;
 use crate::services::librarian::{Librarian, LibrarianSettings};
 use crate::services::memory::Memory;
 use crate::utils::pons::{ObjectMetadata as PonsMetadata, ObjectRef as PonsObjectRef, PonsStore};
@@ -123,6 +128,58 @@ impl Commands {
             .pons_store
             .get_or_try_init(|| PonsStore::open(self.root.clone()).map(Arc::new))?;
         Ok(Arc::clone(store_ref))
+    }
+
+    /// Run content through the contract-enforced runtime. Returns sanitized text on success,
+    /// or Ok(None) if the runtime stopped/escalated/violated (barrier applied).
+    fn govern_text(&self, intent: &str, input: &str) -> Result<Option<String>> {
+        struct EchoStream { yielded: bool, text: String }
+        impl Iterator for EchoStream {
+            type Item = String;
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.yielded { None } else { self.yielded = true; Some(self.text.clone()) }
+            }
+        }
+        struct TextEchoModel { text: String }
+        impl LlmClient for TextEchoModel {
+            type Stream = EchoStream;
+            fn stream(&self, _system_prompt: String) -> std::result::Result<Self::Stream, crate::services::GateError> {
+                Ok(EchoStream { yielded: false, text: self.text.clone() })
+            }
+        }
+
+        let proposal = Proposal {
+            intent: intent.to_string(),
+            input: input.to_string(),
+            prior: None,
+            tools_requested: vec![],
+        };
+        let contract = ContractsDecider;
+        let model = TextEchoModel { text: input.to_string() };
+        let runtime = StreamRuntime { contract, model };
+        let result = runtime.generate(proposal).map_err(|e| anyhow!(e.0))?;
+
+        match result.status {
+            FinalizedStatus::Ok => Ok(Some(result.text)),
+            FinalizedStatus::Stopped => {
+                audit_svc::record_action(
+                    "commands",
+                    "govern_stopped",
+                    &json!({"intent": intent}),
+                    "medium",
+                );
+                Ok(None)
+            }
+            FinalizedStatus::Escalated | FinalizedStatus::Violated => {
+                audit_svc::record_action(
+                    "commands",
+                    "govern_blocked",
+                    &json!({"intent": intent, "status": format!("{:?}", result.status)}),
+                    "high",
+                );
+                Ok(None)
+            }
+        }
     }
 
     // -------------------- Path/name helpers --------------------
@@ -319,38 +376,24 @@ impl Commands {
             "low",
         );
 
-        if self.config.services.ethos_enabled {
-            let v = precheck(content, "memory_storage")
-                .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
-            match decision_gate(&v) {
-                Decision::Block => {
-                    record_action(
-                        "commands",
-                        "remember_blocked",
-                        &json!({"reason": v.reason, "risk": v.risk}),
-                        "high",
-                    );
-                    return Err(anyhow!("blocked by ethics: {}", v.reason));
-                }
-                Decision::AllowWithConstraints => {
-                    record_action(
-                        "commands",
-                        "remember_constraints",
-                        &json!({"constraints": v.constraints, "risk": v.risk}),
-                        "medium",
-                    );
-                }
-                Decision::Allow => {}
+        // Governance: contract decision + runtime interceptor + write barrier
+        let governed_text = if self.config.services.ethos_enabled {
+            match self.govern_text("memory_storage", content) {
+                Ok(Some(sanitized)) => sanitized,
+                Ok(None) => return Err(anyhow!("blocked by runtime")),
+                Err(e) => return Err(anyhow!("runtime error: {}", e)),
             }
-        }
+        } else {
+            content.to_string()
+        };
 
         // Normalize to match Librarian’s behavior when lobe is empty.
         let lobe_eff = if lobe.is_empty() { "notes" } else { lobe };
 
-        // 1) write hot via Librarian
+        // 1) write hot via Librarian (after governance)
         let id = self
             .librarian
-            .ingest_text(&self.memory, lobe_eff, key, content)?;
+            .ingest_text(&self.memory, lobe_eff, key, &governed_text)?;
         record_action(
             "commands",
             "remember_stored",
@@ -439,8 +482,20 @@ impl Commands {
             }
         }
 
+        // Runtime governance for reflection text before writing to memory
+        let governed_note = if self.config.services.ethos_enabled {
+            match self.govern_text("reflection_update", &note)? {
+                Some(s) => s,
+                None => {
+                    return Ok(String::new());
+                }
+            }
+        } else {
+            note.clone()
+        };
+
         if let Some(id) = latest_id_in_lobe(&self.memory, lobe)? {
-            self.memory.set_reflection(&id, &note)?;
+            self.memory.set_reflection(&id, &governed_note)?;
             record_action("commands", "reflect_set", &json!({"id": id}), "low");
         } else {
             record_action(
@@ -450,7 +505,7 @@ impl Commands {
                 "low",
             );
         }
-        Ok(note)
+        Ok(governed_note)
     }
 
     pub fn stats(&self, lobe: Option<&str>) -> Result<Stats> {
@@ -640,23 +695,16 @@ impl Commands {
             )));
         }
 
-        // Ethos gate
-        if self.config.services.ethos_enabled {
-            let v = precheck(content, "replay_append")
-                .map_err(|e| anyhow!("ethos precheck error: {e}"))?;
-            match decision_gate(&v) {
-                Decision::Block => return Err(anyhow!("blocked by ethics: {}", v.reason)),
-                Decision::AllowWithConstraints => {
-                    record_action(
-                        "commands",
-                        "append_constraints",
-                        &json!({"path": path_norm, "constraints": v.constraints, "risk": v.risk}),
-                        "medium",
-                    );
-                }
-                Decision::Allow => {}
+        // Governance: runtime enforcement for append content
+        let governed_text = if self.config.services.ethos_enabled {
+            match self.govern_text("replay_append", content) {
+                Ok(Some(s)) => s,
+                Ok(None) => return Err(anyhow!("blocked by runtime")),
+                Err(e) => return Err(anyhow!("runtime error: {}", e)),
             }
-        }
+        } else {
+            content.to_string()
+        };
 
         let parent = self.dag_head(&path_norm)?;
         let base = crate::memory::dag::path_base_snapshot(&path_norm)?;
@@ -667,7 +715,7 @@ impl Commands {
             "path": path_norm,
             "parents": parent.clone().into_iter().collect::<Vec<_>>() ,
             "base": base,
-            "content_hash": blake3::hash(content.as_bytes()).to_hex().to_string(),
+            "content_hash": blake3::hash(governed_text.as_bytes()).to_hex().to_string(),
         });
         let merged_meta = match meta.unwrap_or_else(|| json!({})) {
             Value::Object(mut m) => {
@@ -679,7 +727,7 @@ impl Commands {
             _ => enrich,
         };
         let state = DagMemoryState {
-            content: content.to_string(),
+            content: governed_text,
             meta: merged_meta,
         };
         let id = self.replay_extend_path(&path_norm, state)?;

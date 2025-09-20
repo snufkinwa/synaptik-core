@@ -11,4 +11,8 @@ pub mod streamgate;
 pub use archivist::Archivist;
 pub use librarian::Librarian;
 pub use memory::Memory;
-pub use streamgate::{GateDecision, StreamGate, StreamGateConfig, StreamingIndex};
+pub use streamgate::{
+    Finalized, FinalizedStatus, GateDecision, GateError, LlmClient, StreamGate, StreamGateConfig,
+    StreamRuntime, StreamingIndex,
+};
+pub use ethos::{ConstraintSpec, EthosContract, Proposal, RuntimeDecision};

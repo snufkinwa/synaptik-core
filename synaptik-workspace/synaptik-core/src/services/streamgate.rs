@@ -1,6 +1,7 @@
 // synaptik-core/src/services/streamgate.rs
 
 use anyhow::Result;
+use serde::Serialize;
 use contracts::types::{ContractRule, MoralContract};
 use std::sync::Arc;
 
@@ -246,4 +247,189 @@ impl StreamGate {
         // No violations observed
         GateDecision::Pass
     }
+}
+
+// -------------------------------------------------------------------------
+// Contract-enforced runtime (synchronous skeleton)
+// -------------------------------------------------------------------------
+
+use crate::services::audit;
+use crate::services::ethos::{ConstraintSpec, EthosContract, Proposal, RuntimeDecision};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum FinalizedStatus {
+    Ok,
+    Violated,
+    Stopped,
+    Escalated,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Finalized {
+    pub status: FinalizedStatus,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violation_label: Option<String>,
+}
+
+impl Finalized {
+    pub fn ok(text: String) -> Self {
+        Self { status: FinalizedStatus::Ok, text, violation_label: None }
+    }
+    pub fn violated(text: String, label: String) -> Self {
+        Self { status: FinalizedStatus::Violated, text, violation_label: Some(label) }
+    }
+    pub fn stopped(template: String) -> Self {
+        Self { status: FinalizedStatus::Stopped, text: template, violation_label: None }
+    }
+    pub fn escalated(reason: String) -> Self {
+        Self { status: FinalizedStatus::Escalated, text: reason, violation_label: None }
+    }
+    pub fn is_ok(&self) -> bool { matches!(self.status, FinalizedStatus::Ok) }
+}
+
+#[derive(Debug)]
+pub struct GateError(pub String);
+
+impl std::fmt::Display for GateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for GateError {}
+
+/// Minimal sync streaming client contract; adapt as needed.
+pub trait LlmClient {
+    type Stream: Iterator<Item = String>;
+    fn stream(&self, system_prompt: String) -> std::result::Result<Self::Stream, GateError>;
+}
+
+pub struct StreamRuntime<C: EthosContract, M: LlmClient> {
+    pub contract: C,
+    pub model: M,
+}
+
+impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
+    pub fn generate(&self, p: Proposal) -> std::result::Result<Finalized, GateError> {
+        let decision = self.contract.evaluate(&p);
+        audit::log_proposal(&p, &decision);
+
+        match decision {
+            RuntimeDecision::Stop { safe_template } => {
+                return Ok(Finalized::stopped(safe_template));
+            }
+            RuntimeDecision::Escalate { ref reason } => {
+                audit::log_escalation(&p, reason);
+                return Ok(Finalized::escalated(reason.clone()));
+            }
+            RuntimeDecision::Proceed | RuntimeDecision::Constrain(_) => {}
+        }
+
+        let constraints = match &decision {
+            RuntimeDecision::Constrain(spec) => Some(spec.clone()),
+            _ => None,
+        };
+
+        let sys_prompt = prompt_compile(&p, constraints.as_ref());
+        let mut stream = self.model.stream(sys_prompt)?;
+
+        let mut buf = String::new();
+        let mut violated: Option<String> = None;
+
+        while let Some(tok) = stream.next() {
+            if let Some(spec) = &constraints {
+                if hits_stop_phrase(&buf, &tok, &spec.stop_phrases) {
+                    violated = Some("stop_phrase".to_string());
+                    break;
+                }
+                let t = apply_masks(&tok, &spec.mask_rules);
+                buf.push_str(&t);
+                if token_limit_reached(&buf, spec.max_tokens) {
+                    break;
+                }
+            } else {
+                buf.push_str(&tok);
+            }
+        }
+
+        let finalized = if let Some(lbl) = violated.clone() {
+            audit::log_violation(&p, &lbl, &buf);
+            Finalized::violated(buf, lbl)
+        } else {
+            Finalized::ok(buf)
+        };
+
+        // Memory write barrier
+        if finalized.is_ok() {
+            // Best-effort commit note: for MVP we log the commit event in memory::commit_snapshot
+            let _ = crate::services::memory::commit_snapshot(&p, &decision, &finalized);
+        } else {
+            audit::log_violation(&p, "rejected_snapshot", &finalized.text);
+        }
+
+        Ok(finalized)
+    }
+}
+
+fn prompt_compile(p: &Proposal, spec: Option<&ConstraintSpec>) -> String {
+    let mut lines = vec![
+        format!("You are an assistant. Intent: {}.", p.intent),
+        "Adhere to the rules below strictly.".into(),
+    ];
+    if let Some(s) = spec {
+        if !s.allow_tools.is_empty() {
+            lines.push(format!("Only call tools: [{}]", s.allow_tools.join(", ")));
+        }
+        if !s.mask_rules.is_empty() {
+            lines.push("Do not output sensitive content; redact it as [masked].".into());
+        }
+        if !s.stop_phrases.is_empty() {
+            lines.push("If unsafe instructions are requested, stop and apologize.".into());
+        }
+    }
+    lines.push("Respond helpfully and safely.".into());
+    lines.join("\n")
+}
+
+fn norm_lower(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch.is_control() { continue; }
+        for lc in ch.to_lowercase() {
+            match lc { '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}, _ => out.push(lc) }
+        }
+    }
+    out
+}
+
+fn hits_stop_phrase(buf: &str, tok: &str, stop_phrases: &[String]) -> bool {
+    if stop_phrases.is_empty() { return false; }
+    let merged = format!("{}{}", buf, tok);
+    let hay = norm_lower(&merged);
+    stop_phrases.iter().any(|s| !s.is_empty() && hay.contains(&norm_lower(s)))
+}
+
+fn apply_masks(tok: &str, mask_rules: &[String]) -> String {
+    if mask_rules.is_empty() { return tok.to_string(); }
+    let mut out = tok.to_string();
+    for pat in mask_rules {
+        if pat.is_empty() { continue; }
+        // simple case-insensitive substring replacement
+        let lower_pat = norm_lower(pat);
+        let mut idx = 0usize;
+        while let Some(pos) = norm_lower(&out[idx..]).find(&lower_pat) {
+            let start = idx + pos;
+            let end = start + out[start..].chars().take(pat.chars().count()).map(char::len_utf8).sum::<usize>();
+            out.replace_range(start..end, "[masked]");
+            idx = start + "[masked]".len();
+        }
+    }
+    out
+}
+
+fn token_limit_reached(buf: &str, max_tokens: usize) -> bool {
+    if max_tokens == 0 { return false; }
+    // rough approximation: whitespace tokens
+    let cnt = buf.split_whitespace().count();
+    cnt >= max_tokens
 }

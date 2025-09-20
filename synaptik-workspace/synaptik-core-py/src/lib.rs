@@ -13,6 +13,8 @@ use syn_core::commands::{Commands, EthosReport, HitSource, Prefer};
 use syn_core::memory::dag::MemoryState as DagMemoryState;
 use syn_core::services::streamgate::{GateDecision as CoreGateDecision, StreamGate as CoreStreamGate, StreamGateConfig, StreamingIndex};
 use syn_core::utils::pons::{ObjectMetadata as PonsMetadata, ObjectRef as PonsObjectRef};
+use syn_core::services::{FinalizedStatus, LlmClient, StreamRuntime};
+use syn_core::services::ethos::{ContractsDecider, Proposal};
 
 fn pyerr<E: std::fmt::Display>(e: E) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
@@ -217,6 +219,45 @@ impl PyCommands {
         d.set_item("constraints", rep.constraints)?;
         d.set_item("action_suggestion", rep.action_suggestion)?;
         d.set_item("violation_code", rep.violation_code)?;
+        Ok(d.into_any().into_py(py))
+    }
+
+    /// Govern text through Synaptik's contract-enforced runtime without persisting.
+    /// Returns a dict {status: "ok|violated|stopped|escalated", text, violation_label}.
+    #[pyo3(signature = (intent, input))]
+    fn govern_text(&self, py: Python<'_>, intent: &str, input: &str) -> PyResult<PyObject> {
+        // Minimal echo streaming model to drive the runtime without network calls.
+        struct EchoStream { yielded: bool, text: String }
+        impl Iterator for EchoStream {
+            type Item = String;
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.yielded { None } else { self.yielded = true; Some(self.text.clone()) }
+            }
+        }
+        struct EchoModel { text: String }
+        impl LlmClient for EchoModel {
+            type Stream = EchoStream;
+            fn stream(&self, _system_prompt: String) -> Result<Self::Stream, syn_core::services::GateError> {
+                Ok(EchoStream { yielded: false, text: self.text.clone() })
+            }
+        }
+
+        let proposal = Proposal { intent: intent.to_string(), input: input.to_string(), prior: None, tools_requested: vec![] };
+        let contract = ContractsDecider;
+        let model = EchoModel { text: input.to_string() };
+        let rt = StreamRuntime { contract, model };
+        let res = rt.generate(proposal).map_err(pyerr)?;
+
+        let status = match res.status {
+            FinalizedStatus::Ok => "ok",
+            FinalizedStatus::Violated => "violated",
+            FinalizedStatus::Stopped => "stopped",
+            FinalizedStatus::Escalated => "escalated",
+        };
+        let d = PyDict::new_bound(py);
+        d.set_item("status", status)?;
+        d.set_item("text", res.text)?;
+        d.set_item("violation_label", res.violation_label)?;
         Ok(d.into_any().into_py(py))
     }
 

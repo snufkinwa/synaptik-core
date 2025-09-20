@@ -54,6 +54,7 @@ impl CoreConfig {
         self.logbook.contract_violations = absolutize(root, &self.logbook.contract_violations);
         self.logbook.contracts_log = absolutize(root, &self.logbook.contracts_log);
         self.contracts.path = absolutize(root, &self.contracts.path);
+        self.contracts.wasm_module_path = absolutize(root, &self.contracts.wasm_module_path);
     }
 }
 
@@ -220,6 +221,26 @@ pub struct ContractsConfig {
     pub path: PathBuf,
     #[serde(default = "ContractsConfig::default_contract")]
     pub default_contract: String,
+    #[serde(default = "ContractsConfig::default_accept_custom")]
+    pub accept_custom: bool,
+    #[serde(default = "ContractsConfig::default_require_signature")]
+    pub require_signature: bool,
+    #[serde(default = "ContractsConfig::default_max_rules")]
+    pub max_rules: usize,
+    #[serde(default = "ContractsConfig::default_max_pattern_len")]
+    pub max_pattern_len: usize,
+    #[serde(default = "ContractsConfig::default_max_file_kb")]
+    pub max_file_kb: usize,
+    #[serde(default)]
+    pub allow_allow_rules: bool,
+    #[serde(default)]
+    pub allowed_signers: Vec<String>,
+    #[serde(default = "ContractsConfig::default_wasm_enabled")]
+    pub wasm_enabled: bool,
+    #[serde(default = "ContractsConfig::default_wasm_module_path")]
+    pub wasm_module_path: PathBuf,
+    #[serde(default = "ContractsConfig::default_wasm_export")]
+    pub wasm_export: String,
 }
 
 impl ContractsConfig {
@@ -230,6 +251,14 @@ impl ContractsConfig {
     fn default_contract() -> String {
         "nonviolence.toml".to_string()
     }
+    fn default_accept_custom() -> bool { true }
+    fn default_require_signature() -> bool { false }
+    fn default_max_rules() -> usize { 500 }
+    fn default_max_pattern_len() -> usize { 256 }
+    fn default_max_file_kb() -> usize { 256 }
+    fn default_wasm_enabled() -> bool { false }
+    fn default_wasm_module_path() -> PathBuf { PathBuf::from("contracts/contract_eval.wasm") }
+    fn default_wasm_export() -> String { "evaluate_contract".into() }
 }
 
 impl Default for ContractsConfig {
@@ -237,6 +266,16 @@ impl Default for ContractsConfig {
         Self {
             path: Self::default_path(),
             default_contract: Self::default_contract(),
+            accept_custom: Self::default_accept_custom(),
+            require_signature: Self::default_require_signature(),
+            max_rules: Self::default_max_rules(),
+            max_pattern_len: Self::default_max_pattern_len(),
+            max_file_kb: Self::default_max_file_kb(),
+            allow_allow_rules: true,
+            allowed_signers: vec![],
+            wasm_enabled: Self::default_wasm_enabled(),
+            wasm_module_path: Self::default_wasm_module_path(),
+            wasm_export: Self::default_wasm_export(),
         }
     }
 }

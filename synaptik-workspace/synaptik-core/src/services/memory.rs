@@ -16,6 +16,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::memory::dag;
+use crate::services::audit;
+use crate::services::ethos::{Proposal, RuntimeDecision};
+use crate::services::streamgate::Finalized;
 
 /// Memory is the single authority for writing to SQLite.
 /// Expose `db` as `pub(crate)` if other services need read-only helpers internally.
@@ -462,4 +465,35 @@ impl Memory {
     pub fn latest_archived_cid_in_lobe_public(&self, lobe: &str) -> Result<Option<String>> {
         self.latest_archived_cid_in_lobe(lobe)
     }
+}
+
+// -------------------------------------------------------------------------
+// Stream runtime write barrier (MVP: audit-only commit)
+// -------------------------------------------------------------------------
+
+/// Best-effort snapshot commit for stream runtime. For the MVP we only audit the commit
+/// attempt rather than persisting the streamed output in SQLite.
+pub fn commit_snapshot(
+    proposal: &Proposal,
+    decision: &RuntimeDecision,
+    finalized: &Finalized,
+) -> Result<()> {
+    let status = match finalized.status {
+        crate::services::streamgate::FinalizedStatus::Ok => "ok",
+        crate::services::streamgate::FinalizedStatus::Violated => "violated",
+        crate::services::streamgate::FinalizedStatus::Stopped => "stopped",
+        crate::services::streamgate::FinalizedStatus::Escalated => "escalated",
+    };
+    audit::record_action(
+        "streamruntime",
+        "commit_snapshot",
+        &serde_json::json!({
+            "intent": proposal.intent,
+            "decision": decision,
+            "status": status,
+            "preview": String::from(finalized.text.chars().take(160).collect::<String>()),
+        }),
+        "low",
+    );
+    Ok(())
 }

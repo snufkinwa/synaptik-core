@@ -1,6 +1,8 @@
 //! services/ethos.rs
 //! Contract-centric Ethos agent: risk + ethics precheck with unified auditing.
 
+use serde::{Deserialize, Serialize};
+
 use serde_json::json;
 
 use crate::commands::init::ensure_initialized_once;
@@ -30,6 +32,102 @@ pub enum Decision {
     Block,
 }
 
+// -------------------------------------------------------------------------
+// Contract-enforced runtime primitives
+// -------------------------------------------------------------------------
+
+/// Proposal received at the runtime ingress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Proposal {
+    pub intent: String,
+    pub input: String,
+    #[serde(default)]
+    pub prior: Option<String>,
+    #[serde(default)]
+    pub tools_requested: Vec<String>,
+}
+
+/// Constraint specification for Constrain() decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConstraintSpec {
+    #[serde(default)]
+    pub mask_rules: Vec<String>,       // regex or literal patterns (we use literal substrings in MVP)
+    #[serde(default)]
+    pub allow_tools: Vec<String>,      // tool names
+    #[serde(default)]
+    pub stop_phrases: Vec<String>,     // early stop triggers
+    #[serde(default = "ConstraintSpec::default_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(default = "ConstraintSpec::default_temperature_cap")]
+    pub temperature_cap: f32,
+}
+
+impl ConstraintSpec {
+    fn default_max_tokens() -> usize { 256 }
+    fn default_temperature_cap() -> f32 { 0.7 }
+}
+
+/// Runtime decision emitted by an ethos contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum RuntimeDecision {
+    Proceed,
+    Constrain(ConstraintSpec),
+    Stop { safe_template: String },
+    Escalate { reason: String },
+}
+
+/// Contract interface for runtime decisions.
+pub trait EthosContract {
+    fn evaluate(&self, p: &Proposal) -> RuntimeDecision;
+}
+
+// A contracts-driven decider that delegates to the contracts package (WASM-capable backend).
+// Note: The actual WASM execution lives in the contracts crate; here we only call into its API
+// via the audit bridge, which resolves the configured contract and records evaluation.
+pub struct ContractsDecider;
+
+impl EthosContract for ContractsDecider {
+    fn evaluate(&self, p: &Proposal) -> RuntimeDecision {
+        // Always evaluate contracts; no disable path.
+        let cfg = ensure_initialized_once().map(|r| r.config.clone()).unwrap_or_default();
+        let default_name = Some(cfg.contracts.default_contract.clone());
+        let eval = match crate::services::audit::evaluate_and_audit_contract(
+            &ContractEvalMeta {
+                kind: "Ethics".into(),
+                contract_name: default_name,
+                metadata: json!({ "intent": p.intent }),
+            },
+            &p.input,
+        ) {
+            Ok(v) => v,
+            Err(_) => json!({"passed": false}),
+        };
+
+        let passed = eval.get("passed").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !passed {
+            return RuntimeDecision::Stop { safe_template: "I can’t assist with that. If you’re concerned about safety, consider reaching out to local resources for help.".to_string() };
+        }
+
+        // Soft constraints: if any were suggested by policy, apply a conservative runtime spec.
+        let constraints = eval
+            .get("constraints")
+            .and_then(|v| v.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+        if constraints {
+            return RuntimeDecision::Constrain(ConstraintSpec {
+                mask_rules: vec![],
+                allow_tools: vec![],
+                stop_phrases: vec!["how to".into(), "step by step".into()],
+                max_tokens: ConstraintSpec::default_max_tokens(),
+                temperature_cap: ConstraintSpec::default_temperature_cap(),
+            });
+        }
+
+        RuntimeDecision::Proceed
+    }
+}
+
 /// Synchronous, contract-backed risk + ethics check.
 ///
 /// # Arguments
@@ -46,14 +144,6 @@ pub enum Decision {
 /// * Writes a normalized ethics decision entry to the logbook via [`record_ethics_decision`].
 /// * Also logs the raw contract evaluations (risk + ethics) via [`evaluate_and_audit_contract`].
 pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict, String> {
-    if !ethos_enabled() {
-        return Ok(EthosVerdict {
-            risk: "Low".to_string(),
-            constraints: Vec::new(),
-            passed: true,
-            reason: "ethos_disabled".to_string(),
-        });
-    }
 
     // 1) Risk assessment
     let risk_val = evaluate_and_audit_contract(
@@ -137,11 +227,7 @@ pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict
     })
 }
 
-fn ethos_enabled() -> bool {
-    ensure_initialized_once()
-        .map(|report| report.config.services.ethos_enabled)
-        .unwrap_or(true)
-}
+// Contract checks are always enabled; no feature flag bypass.
 
 /// Map an [`EthosVerdict`] into an actionable gate decision.
 ///
