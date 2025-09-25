@@ -1011,6 +1011,83 @@ fn dag_writes_are_consistent() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Compactor end-to-end: compacts benign text, rejects harmful summary with reason
+#[test]
+fn compactor_compacts_and_reports_ethos() {
+    // Ensure stable contract behavior for rejection reason/risk
+    let _g = contract_test_guard();
+    let cmds = Commands::new("ignored", None).expect("commands new");
+    cmds.lock_contracts();
+
+    // Isolated SQLite for this test
+    let db_path = tmp_path("compactor_mem.sqlite3");
+    let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
+
+    // Unique lobe
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let lobe = format!("compact_{}", ns);
+
+    // Seed two rows: one benign, one that should be rejected by ethos
+    let good_id = format!("{}_good", lobe);
+    let bad_id = format!("{}_bad", lobe);
+    let good_content = "I enjoy gardening. It is relaxing.";
+    let bad_content = "I want to kill her. This should be blocked.";
+    mem.remember(&good_id, &lobe, "k1", good_content.as_bytes())
+        .expect("remember good");
+    mem.remember(&bad_id, &lobe, "k2", bad_content.as_bytes())
+        .expect("remember bad");
+
+    // Run compactor with heuristic summarizer; do not archive to DAG (keep it simple)
+    let comp = synaptik_core::services::compactor::Compactor { memory: &mem, pons: None };
+    let policy = synaptik_core::config::CompactionPolicy {
+        select_top_k: Some(50),
+        prefer_rarely_accessed: false,
+        archive_to_dag: false,
+        summarizer: synaptik_core::config::SummarizerKind::Heuristic,
+        target_chars: None,
+    };
+    let report = comp
+        .compact_lobe(&lobe, &policy, false)
+        .expect("compact_lobe");
+
+    // Expect both candidates considered; one compressed, one regret
+    assert_eq!(report.candidates, 2);
+    assert_eq!(report.compressed + report.regrets, 2);
+    assert_eq!(report.regrets, 1, "one summary should be rejected by ethos");
+
+    // Notes should include an ethos rejection line with the bad id and likely High risk
+    let joined = report.notes.join("\n");
+    assert!(
+        joined.contains(&format!("ethos rejected summary {}", bad_id)),
+        "notes should mention ethos reject for bad id; notes=\n{}",
+        joined
+    );
+
+    // Benign summary should have been written into the summary column
+    let conn = open_sqlite(&db_path);
+    let good_sum: Option<String> = conn
+        .query_row(
+            "SELECT summary FROM memories WHERE memory_id=?1",
+            [good_id.as_str()],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(good_sum.is_some(), "benign row should have a summary after compaction");
+
+    // Harmful row should not have summary set (still NULL)
+    let bad_sum: Option<String> = conn
+        .query_row(
+            "SELECT summary FROM memories WHERE memory_id=?1",
+            [bad_id.as_str()],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(bad_sum.is_none(), "rejected row should not have summary set");
+}
+
 /// Pons store should write bytes + metadata and round-trip via latest helpers.
 #[test]
 fn pons_store_roundtrip_bytes_and_meta() -> anyhow::Result<()> {

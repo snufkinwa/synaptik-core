@@ -407,6 +407,14 @@ impl PonsStore {
     fn versions_dir(&self, pons: &str, key: &str) -> PathBuf {
         self.key_dir(pons, key).join(VERSIONS_DIR)
     }
+
+    /// Convenience helper used by Compactor: store original text sidecar by memory id.
+    /// Best-effort; callers typically ignore errors.
+    pub fn store_original(&self, lobe: &str, memory_id: &str, text: &str) -> Result<()> {
+        let key = format!("compactor/originals/{}.txt", sanitize_key(memory_id)?);
+        let _ = self.put_object(lobe, &key, text.as_bytes())?;
+        Ok(())
+    }
 }
 
 // ---------- helpers ----------

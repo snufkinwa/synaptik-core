@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::memory::dag;
+use crate::config::SummarizerKind;
 use crate::services::audit;
 use crate::services::ethos::{Proposal, RuntimeDecision};
 use crate::services::streamgate::Finalized;
@@ -24,6 +25,13 @@ use crate::services::streamgate::Finalized;
 /// Expose `db` as `pub(crate)` if other services need read-only helpers internally.
 pub struct Memory {
     pub(crate) db: Connection,
+}
+
+/// Minimal candidate record for compaction.
+#[derive(Debug, Clone)]
+pub struct MemoryCandidate {
+    pub id: String,
+    pub archived_cid: Option<String>,
 }
 
 impl Memory {
@@ -432,6 +440,137 @@ impl Memory {
         del.finalize()?;
         tx.commit()?;
         Ok(cnt)
+    }
+
+    // -------------------------------------------------------------------------
+    // Compaction helpers (minimal API for Compactor)
+    // -------------------------------------------------------------------------
+
+    /// Select candidate rows for compaction within a lobe.
+    ///
+    /// Strategy (minimal):
+    /// - If `prefer_rarely_accessed` pick oldest by created_at (ASC), else newest by updated_at (DESC).
+    /// - Return at most `top_k` rows.
+    pub fn select_compaction_candidates(
+        &self,
+        lobe: &str,
+        top_k: u32,
+        prefer_rarely_accessed: bool,
+    ) -> Result<Vec<MemoryCandidate>> {
+        // Use fixed SQL variants to avoid interpolating ORDER BY dynamically.
+        // This eliminates any possibility of SQL injection via ORDER BY fragments.
+        const SQL_BY_CREATED: &str =
+            "SELECT memory_id, archived_cid FROM memories WHERE lobe=?1 ORDER BY created_at ASC LIMIT ?2";
+        const SQL_BY_UPDATED: &str =
+            "SELECT memory_id, archived_cid FROM memories WHERE lobe=?1 ORDER BY updated_at DESC LIMIT ?2";
+
+        let sql = if prefer_rarely_accessed { SQL_BY_CREATED } else { SQL_BY_UPDATED };
+        let mut stmt = self.db.prepare(sql)?;
+        let iter = stmt.query_map((lobe, top_k as i64), |row| {
+            Ok(MemoryCandidate {
+                id: row.get::<_, String>(0)?,
+                archived_cid: row.get::<_, Option<String>>(1)?,
+            })
+        })?;
+        Ok(iter.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Fetch content as UTF-8 string for a given memory id.
+    pub fn get_content(&self, memory_id: &str) -> Result<String> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT content FROM memories WHERE memory_id=?1")?;
+        let mut rows = stmt.query([memory_id])?;
+        if let Some(row) = rows.next()? {
+            let bytes: Vec<u8> = row.get(0)?;
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        bail!("memory row not found: {memory_id}")
+    }
+
+    /// Minimal raw accessor (same as `get_content` for MVP).
+    pub fn get_raw(&self, memory_id: &str) -> Result<String> {
+        self.get_content(memory_id)
+    }
+
+    /// Replace the `content` with a compacted summary, also store it in `summary` and bump timestamp.
+    pub fn replace_with_summary(&self, memory_id: &str, summary: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.execute(
+            "UPDATE memories SET content=?1, summary=?2, updated_at=?3 WHERE memory_id=?4",
+            (summary.as_bytes(), summary, &now, memory_id),
+        )?;
+        Ok(())
+    }
+
+    /// Minimal built-in summarizer used by Compactor.
+    /// Supports several simple modes without external dependencies.
+    pub fn summarize(&self, kind: SummarizerKind, text: &str) -> Result<String> {
+        fn split_sentences(s: &str) -> Vec<String> {
+            s.split_terminator(|c| c == '.' || c == '!' || c == '?')
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .map(|p| format!("{}.", p))
+                .collect()
+        }
+        fn first_lines(s: &str, n: usize) -> String {
+            s.lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .take(n)
+                .collect::<Vec<_>>()
+                .join(" \n")
+        }
+        let out = match kind {
+            SummarizerKind::Heuristic => {
+                let mut out = String::new();
+                let mut sentences = 0usize;
+                for sent in split_sentences(text) {
+                    if !out.is_empty() { out.push(' '); }
+                    out.push_str(&sent);
+                    sentences += 1;
+                    if sentences >= 2 || out.len() >= 400 { break; }
+                }
+                if out.is_empty() {
+                    out = text.chars().take(400).collect();
+                }
+                out
+            }
+            SummarizerKind::Extractive => {
+                let mut out = String::new();
+                let mut sentences = 0usize;
+                for sent in split_sentences(text) {
+                    if !out.is_empty() { out.push(' '); }
+                    out.push_str(&sent);
+                    sentences += 1;
+                    if sentences >= 3 || out.len() >= 600 { break; }
+                }
+                if out.is_empty() {
+                    out = text.chars().take(600).collect();
+                }
+                out
+            }
+            SummarizerKind::Minimal => {
+                let s = first_lines(text, 2);
+                if s.is_empty() { text.lines().next().unwrap_or("").chars().take(160).collect() } else { s }
+            }
+            SummarizerKind::Compressive => {
+                // Placeholder: behave like heuristic but tighter budget
+                let mut out = String::new();
+                let mut sentences = 0usize;
+                for sent in split_sentences(text) {
+                    if !out.is_empty() { out.push(' '); }
+                    out.push_str(&sent);
+                    sentences += 1;
+                    if sentences >= 2 || out.len() >= 256 { break; }
+                }
+                if out.is_empty() {
+                    out = text.chars().take(256).collect();
+                }
+                out
+            }
+        };
+        Ok(out)
     }
 }
 

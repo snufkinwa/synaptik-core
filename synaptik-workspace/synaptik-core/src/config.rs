@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing;
@@ -213,6 +213,59 @@ impl Default for ServicesConfig {
             audit_enabled: true,
         }
     }
+}
+
+// -------------------------------------------------------------------------
+// Compaction config (used by services::compactor)
+// -------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummarizerKind {
+    Heuristic,   // default
+    Extractive,  // simple lead-3 / top-sentences
+    Minimal,     // 1–2 key lines
+    Compressive, // future LLM path
+}
+
+impl Default for SummarizerKind {
+    fn default() -> Self {
+        SummarizerKind::Heuristic
+    }
+}
+
+impl SummarizerKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SummarizerKind::Heuristic => "heuristic",
+            SummarizerKind::Extractive => "extractive",
+            SummarizerKind::Minimal => "minimal",
+            SummarizerKind::Compressive => "compressive",
+        }
+    }
+
+    #[allow(deprecated)]
+    pub fn clone_or_default(&self) -> Self {
+        self.clone()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CompactionPolicy {
+    #[serde(default)]
+    pub select_top_k: Option<u32>,
+    #[serde(default)]
+    pub prefer_rarely_accessed: bool,
+    #[serde(default = "CompactionPolicy::default_archive_to_dag")]
+    pub archive_to_dag: bool,
+    #[serde(default)]
+    pub summarizer: SummarizerKind,
+    #[serde(default)]
+    pub target_chars: Option<usize>, // optional target length for future use
+}
+
+impl CompactionPolicy {
+    fn default_archive_to_dag() -> bool { true }
 }
 
 #[derive(Debug, Clone, Deserialize)]
