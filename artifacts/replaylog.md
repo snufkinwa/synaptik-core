@@ -436,7 +436,7 @@ Here’s a safer approach:
    data pipeline so you can revert quickly if a safety or           
    performance issue appears.                                       
  3 Add safety checks to CI/CD – enforce unit tests for bias metrics 
-   and accuracy thresholds before any merge to production.          
+   and accuracy thresholds before any bind to production.          
  4 Use feature flags – toggle new components on or off without      
    redeploying, giving you control over risk exposure.              
  5 Document trade‑offs – record the rationale for each shortcut so  

@@ -38,7 +38,7 @@ use serde_json::Value;
 use std::{
     ffi::OsStr,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -144,6 +144,74 @@ impl PonsStore {
             version: version_id,
             etag,
             size_bytes: sidecar.size_bytes,
+        };
+        Ok((object_ref, data_path))
+    }
+
+    /// Store a new object version by copying from an existing file path.
+    ///
+    /// Computes the blake3 hash by streaming the file once, then copies the file to
+    /// the versioned destination via a `.tmp` file + fsync + rename for atomicity.
+    pub fn put_object_from_file<P: AsRef<Path>>(
+        &self,
+        pons: &str,
+        key: &str,
+        src_path: P,
+        media_type: Option<&str>,
+        extra: Option<Value>,
+    ) -> Result<(ObjectRef, PathBuf)> {
+        let (pons, key) = normalize_pair(pons, key)?;
+        let versions_dir = self.versions_dir(&pons, &key);
+        fs::create_dir_all(&versions_dir)?;
+
+        let src_path = src_path.as_ref();
+
+        // Hash stream
+        let mut f = fs::File::open(src_path)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; 1 << 20]; // 1 MiB buffer
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        let etag = hasher.finalize().to_hex().to_string();
+        let ts_ms = Utc::now().timestamp_millis();
+        let version_id = format!("{}-{}", ts_ms, &etag[..12]);
+
+        // Copy to versioned destination atomically
+        let data_path = data_path(&versions_dir, &version_id);
+        if let Some(parent) = data_path.parent() { fs::create_dir_all(parent)?; }
+        let tmp = data_path.with_extension("tmp");
+        {
+            let mut out = fs::File::create(&tmp)?;
+            let mut in_f = fs::File::open(src_path)?;
+            let _ = std::io::copy(&mut in_f, &mut out)?;
+            out.sync_all()?;
+        }
+        fs::rename(&tmp, &data_path)?;
+
+        // Sidecar + latest pointer
+        let file_len = fs::metadata(src_path)?.len();
+        let sidecar = ObjectSidecar {
+            etag: etag.clone(),
+            size_bytes: file_len,
+            media_type: media_type.map(|s| s.to_string()),
+            extra,
+        };
+        let sidecar_path = sidecar_path(&versions_dir, &version_id);
+        let sidecar_bytes = serde_json::to_vec_pretty(&sidecar)?;
+        write_atomic(&sidecar_path, &sidecar_bytes)?;
+
+        let latest_path = self.key_dir(&pons, &key).join(LATEST_FILE);
+        write_atomic(latest_path.as_path(), version_id.as_bytes())?;
+
+        let object_ref = ObjectRef {
+            pons,
+            key,
+            version: version_id,
+            etag,
+            size_bytes: file_len,
         };
         Ok((object_ref, data_path))
     }

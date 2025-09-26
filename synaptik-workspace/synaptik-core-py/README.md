@@ -74,7 +74,7 @@ content = cmd.recall_prefer(head) # str or None
 
 Notes:
 - Paths normalize to lowercase; “feature-x” and “feature_x” are equivalent.
-- Consolidation is fast‑forward only; merges are not yet supported.
+- Consolidation is fast‑forward only; binds are not yet supported.
 - Prefer `sprout_dendrite()/encode_engram()/systems_consolidate()`; legacy `begin_branch/extend_path` remain for compatibility. Aliases `branch/append/consolidate` are available.
 
 ## License

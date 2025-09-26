@@ -27,7 +27,7 @@ Lightweight Rust/Python core library that gives LLM agents durable memory and au
 - **Python Bindings (PyCommands)** — functions used in the demo (no Rust internals):
   - Ethics: `precheck_text()`
   - Replay: `seed_base_from_lobe()`, `last_recalled_id()`, `recall_snapshot()`, `recall_and_diverge()`, `extend_path()`, `trace_path()`, `recall_latest_on_path()`, `cite_sources()`
-  - Neuroscience ops: `sprout_dendrite()`, `encode_engram()`, `systems_consolidate()`, `merge()`
+  - Neuroscience ops: `sprout_dendrite()`, `encode_engram()`, `systems_consolidate()`, `bind()`
   - Path helpers: `dag_head()`, `update_path_head()`
   - Misc: `root()`
 - **No cloud dependency** — everything runs locally

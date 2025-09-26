@@ -1,6 +1,9 @@
 use crate::types::{ContractRule, MoralContract};
+use crate::normalize::for_rules;
 use serde::Serialize;
-use std::{collections::HashSet, fs};
+use std::{collections::HashSet, fs, thread, time::Duration};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use toml;
 
 // ----------------- Result -----------------
@@ -13,34 +16,91 @@ pub struct EvaluationResult {
     pub primary_violation_code: Option<String>,
     pub action_suggestion: Option<String>,
 
-    // NEW: merged, deduped constraints from matched rules
+    // NEW: binding, deduped constraints from matched rules
     #[serde(default)]
     pub constraints: Vec<String>,
 }
 
 // ----------------- I/O -----------------
 
-pub fn load_contract_from_file(path: &str) -> MoralContract {
-    let content = fs::read_to_string(path).expect("Failed to read contract file");
-    toml::from_str(&content).expect("Failed to parse TOML")
+/// Result type for contract loading.
+pub type LoadResult<T> = std::result::Result<T, LoadError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    #[error("io: {0}")] Io(#[from] std::io::Error),
+    #[error("empty_after_retries path={path}")] Empty { path: String },
+    #[error("parse path={path} error={err}")] Parse { path: String, err: String },
+}
+
+/// Exponential backoff schedule (ms) with jitter 0..=10 ms added each attempt.
+const BACKOFF_SERIES: [u64;5] = [25, 50, 100, 200, 400];
+
+/// Attempt to load and parse a contract with resilience and without panicking.
+/// Returns a MoralContract on success or a LoadError. Caller may decide to fallback.
+pub fn load_contract_from_file(path: &str) -> LoadResult<MoralContract> {
+    let mut rng = StdRng::from_entropy();
+    let mut last_content = String::new();
+    for (i, base) in BACKOFF_SERIES.iter().enumerate() {
+        match fs::read_to_string(path) {
+            Ok(c) => {
+                if c.trim().is_empty() {
+                    last_content = c;
+                    if i + 1 == BACKOFF_SERIES.len() {
+                        return Err(LoadError::Empty { path: path.to_string() });
+                    }
+                } else {
+                    last_content = c;
+                    break;
+                }
+            }
+            Err(e) => {
+                if i + 1 == BACKOFF_SERIES.len() {
+                    return Err(LoadError::Io(e));
+                }
+            }
+        }
+        // Sleep with jitter before next attempt if not last
+        let jitter = rng.gen_range(0..=10);
+        thread::sleep(Duration::from_millis(*base + jitter));
+    }
+
+    ATP_COUNTER.fetch_add(ATP_COST_LOAD, std::sync::atomic::Ordering::Relaxed);
+    toml::from_str(&last_content).map_err(|e| LoadError::Parse { path: path.to_string(), err: e.to_string() })
+}
+
+/// Fallback helper: attempt load, else synthesize a minimal inert contract so callers can proceed.
+pub fn load_or_default(path: &str) -> MoralContract {
+    match load_contract_from_file(path) {
+        Ok(c) => c,
+        Err(e) => {
+            // Minimal transparent fallback contract (no rules) to keep pipeline alive; log via eprintln.
+            eprintln!("[contracts] fallback to empty contract: {}", e);
+            MoralContract { name: "fallback".into(), version: "0".into(), description: Some("Empty fallback contract".into()), rules: vec![] }
+        }
+    }
+}
+
+// ----------------- ATP (gas-like) accounting -----------------
+use std::sync::atomic::{AtomicU64, Ordering as _Ordering};
+/// Global ATP counter (monotonic). Represents cumulative metabolic cost of contract eval operations.
+pub static ATP_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Nominal ATP costs (tunable heuristics).
+pub const ATP_COST_LOAD: u64 = 10; // loading/parsing a contract
+pub const ATP_COST_EVAL_RULE: u64 = 1; // per rule evaluated
+
+/// Session-scoped ATP meter: snapshot then measure delta.
+#[derive(Debug, Clone)]
+pub struct AtpSession {
+    start: u64,
+}
+impl AtpSession {
+    pub fn start() -> Self { Self { start: ATP_COUNTER.load(_Ordering::Relaxed) } }
+    pub fn delta(&self) -> u64 { ATP_COUNTER.load(_Ordering::Relaxed).saturating_sub(self.start) }
 }
 
 // ----------------- Helpers -----------------
 
-fn norm(s: &str) -> String {
-    // lowercase; skip control / zero-width
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        match ch {
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
-            _ => out.push(ch.to_ascii_lowercase()),
-        }
-    }
-    out
-}
 
 fn severity_rank(s: Option<&str>) -> i32 {
     match s {
@@ -54,11 +114,11 @@ fn severity_rank(s: Option<&str>) -> i32 {
 }
 
 fn rule_matches(rule: &ContractRule, text: &str) -> bool {
-    let t = norm(text);
+    let t = for_rules(text);
     // exact phrase (matches_any) first = more specific
     if let Some(list) = &rule.matches_any {
         for p in list {
-            if !p.is_empty() && t.contains(&norm(p)) {
+            if !p.is_empty() && t.contains(&for_rules(p)) {
                 return true;
             }
         }
@@ -66,14 +126,14 @@ fn rule_matches(rule: &ContractRule, text: &str) -> bool {
     // keyword (contains_any)
     if let Some(list) = &rule.contains_any {
         for k in list {
-            if !k.is_empty() && t.contains(&norm(k)) {
+            if !k.is_empty() && t.contains(&for_rules(k)) {
                 return true;
             }
         }
     }
     // legacy contains
     for k in &rule.contains {
-        if !k.is_empty() && t.contains(&norm(k)) {
+        if !k.is_empty() && t.contains(&for_rules(k)) {
             return true;
         }
     }
@@ -96,6 +156,7 @@ pub fn evaluate_input_against_rules(input: &str, contract: &MoralContract) -> Ev
     // Pass 1: allowlist (takes precedence)
     let mut allow_constraints: HashSet<String> = HashSet::new();
     for rule in &contract.rules {
+        ATP_COUNTER.fetch_add(ATP_COST_EVAL_RULE, _Ordering::Relaxed);
         let eff = rule.effect.as_deref().unwrap_or("");
         let is_allow = eff.eq_ignore_ascii_case("allow")
             || rule
@@ -124,6 +185,7 @@ pub fn evaluate_input_against_rules(input: &str, contract: &MoralContract) -> Ev
     let mut constraints: HashSet<String> = HashSet::new();
 
     for rule in &contract.rules {
+        ATP_COUNTER.fetch_add(ATP_COST_EVAL_RULE, _Ordering::Relaxed);
         // Skip allow rules in violation pass
         let eff = rule.effect.as_deref().unwrap_or("");
         let is_allow = eff.eq_ignore_ascii_case("allow")

@@ -30,7 +30,7 @@ NEURO‑OPS VOCAB (for explanations; engine uses these names):
 - encode_engram(path, content, meta=None) → append an engram with auto provenance (ethics‑gated)
 - systems_consolidate(src_path, dst_path="cortex") → fast‑forward consolidate to cortex if ancestor
 - engram_head(path) / set_engram_head(path, cid) → get/set the latest engram on a path
-- reconsolidate_paths(src_path, dst_path="cortex", note) → future merge (2 parents); FF until supported
+- reconsolidate_paths(src_path, dst_path="cortex", note) → future bind (2 parents); FF until supported
 
 PROVENANCE (cite sources):
 - Cite for newest on a path: {"action":"cite_sources","args":{"path_name":"plan-a"}}

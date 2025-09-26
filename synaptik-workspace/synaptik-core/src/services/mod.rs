@@ -7,6 +7,7 @@ pub mod librarian; // thin router: summarize/reflect -> memory; optional promote
 pub mod memory; // the ONLY SQLite writer // file-only cold store (CID <-> bytes)
 pub mod streamgate;
 pub mod compactor; // summarization + safety gate + replace
+pub mod masking;   // shared normalization + masking helpers
 
 // Public API
 pub use archivist::Archivist;

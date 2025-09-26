@@ -1,11 +1,10 @@
 // src/commands/mod.rs
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::path::PathBuf;
 
 use crate::config::CoreConfig;
-use crate::memory::dag::MemoryState as DagMemoryState;
 use crate::services::archivist::Archivist;
 use crate::services::audit::{lock_contracts, record_action, unlock_contracts};
 use crate::services::ethos::{Decision, decision_gate, precheck};
@@ -16,16 +15,16 @@ use crate::services::ethos::{ContractsDecider, Proposal};
 use crate::services::audit as audit_svc;
 use crate::services::librarian::{Librarian, LibrarianSettings};
 use crate::services::memory::Memory;
-use crate::utils::pons::{ObjectMetadata as PonsMetadata, ObjectRef as PonsObjectRef, PonsStore};
+use crate::utils::pons::PonsStore;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 
 use crate::commands::init::ensure_initialized_once;
-use crate::commands::{HitSource, Prefer, RecallResult, bytes_to_string_owned};
+use crate::commands as cmd;
 
 pub struct Commands {
-    memory: Memory,       // one SQLite connection here
-    librarian: Librarian, // no DB inside
+    pub(crate) memory: Memory,       // one SQLite connection here
+    pub(crate) librarian: Librarian, // no DB inside
     config: CoreConfig,
     root: PathBuf,
     pons_store: OnceCell<Arc<PonsStore>>, // lazily initialized, shared store
@@ -123,7 +122,7 @@ impl CommandsBuilder {
 }
 
 impl Commands {
-    fn pons_store(&self) -> Result<Arc<PonsStore>> {
+    pub(crate) fn pons_store(&self) -> Result<Arc<PonsStore>> {
         let store_ref = self
             .pons_store
             .get_or_try_init(|| PonsStore::open(self.root.clone()).map(Arc::new))?;
@@ -132,7 +131,7 @@ impl Commands {
 
     /// Run content through the contract-enforced runtime. Returns sanitized text on success,
     /// or Ok(None) if the runtime stopped/escalated/violated (barrier applied).
-    fn govern_text(&self, intent: &str, input: &str) -> Result<Option<String>> {
+    pub(crate) fn govern_text(&self, intent: &str, input: &str) -> Result<Option<String>> {
         struct EchoStream { yielded: bool, text: String }
         impl Iterator for EchoStream {
             type Item = String;
@@ -184,7 +183,7 @@ impl Commands {
 
     // -------------------- Path/name helpers --------------------
 
-    fn normalize_path_name(&self, name: &str) -> String {
+    pub(crate) fn normalize_path_name(&self, name: &str) -> String {
         let mut s = name.to_lowercase();
         s.retain(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         if s.is_empty() { "path".to_string() } else { s }
@@ -222,62 +221,7 @@ impl Commands {
         &self.config
     }
 
-    /// Ensure a pons namespace exists under the shared root.
-    pub fn pons_create(&self, pons: &str) -> Result<()> {
-        let store = self.pons_store()?;
-        store.create_pons(pons)
-    }
-
-    /// Write bytes plus optional metadata into a pons/key stream.
-    pub fn pons_put_object(
-        &self,
-        pons: &str,
-        key: &str,
-        data: &[u8],
-        media_type: Option<&str>,
-        extra: Option<Value>,
-    ) -> Result<PonsObjectRef> {
-        let store = self.pons_store()?;
-        // Filesystem paths are an internal detail of the Pons store.
-        // We expose only the content-addressed ObjectRef; callers shouldn't rely on on-disk paths.
-        let (obj, path) = store.put_object_with_meta(pons, key, data, media_type, extra)?;
-        let _ = path; // explicitly discard internal path to make intent clear
-        Ok(obj)
-    }
-
-    /// Read newest bytes for a pons/key.
-    pub fn pons_get_latest_bytes(&self, pons: &str, key: &str) -> Result<Vec<u8>> {
-        let store = self.pons_store()?;
-        store.get_object_latest(pons, key)
-    }
-
-    /// Fetch newest ObjectRef for a pons/key.
-    pub fn pons_get_latest_ref(&self, pons: &str, key: &str) -> Result<PonsObjectRef> {
-        let store = self.pons_store()?;
-        store.get_object_latest_ref(pons, key)
-    }
-
-    /// Fetch a specific version's bytes and metadata.
-    pub fn pons_get_version_with_meta(
-        &self,
-        pons: &str,
-        key: &str,
-        version: &str,
-    ) -> Result<(Vec<u8>, PonsMetadata)> {
-        let store = self.pons_store()?;
-        store.get_object_version_with_meta(pons, key, version)
-    }
-
-    /// List the latest refs under a pons namespace.
-    pub fn pons_list_latest(
-        &self,
-        pons: &str,
-        prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<PonsObjectRef>> {
-        let store = self.pons_store()?;
-        store.list_latest(pons, prefix, limit)
-    }
+    // Pons methods moved to commands::pons
 
     /// Gate arbitrary text with Ethos (for normal chat).
     pub fn precheck_text(&self, text: &str, purpose: &str) -> Result<EthosReport> {
@@ -321,52 +265,7 @@ impl Commands {
     }
 
     /// Newest → oldest memory_ids for a lobe.
-    pub fn recent(&self, lobe: &str, n: usize) -> Result<Vec<String>> {
-        recent_ids_in_lobe(&self.memory, lobe, n)
-    }
-
-    /// Recall full text (auto: hot → archive → dag). Returns just the content string.
-    pub fn recall(&self, memory_id: &str) -> Result<Option<String>> {
-        Ok(self.recall_any(memory_id, Prefer::Auto)?.map(|r| r.content))
-    }
-
-    /// Layered recall returning which source was used. prefer: "hot"|"archive"|"dag"|"auto"
-    pub fn recall_with_source(
-        &self,
-        memory_id: &str,
-        prefer: Option<&str>,
-    ) -> Result<Option<(String, String)>> {
-        Ok(self.recall_any(memory_id, parse_prefer(prefer))?.map(|r| {
-            let src = match r.source {
-                HitSource::Hot => "hot",
-                HitSource::Archive => "archive",
-                HitSource::Dag => "dag",
-            };
-            (r.content, src.to_string())
-        }))
-    }
-
-    /// Bulk alias: for each id, attempt multi-tier recall and include id, content, and source.
-    /// Returns Vec of (id, content, source) for all ids that could be recalled.
-    pub fn total_recall_many(
-        &self,
-        memory_ids: &[String],
-        prefer: Option<&str>,
-    ) -> Result<Vec<(String, String, String)>> {
-        let hits = self.recall_many(memory_ids, parse_prefer(prefer))?;
-        Ok(hits
-            .into_iter()
-            .map(|r| {
-                let src = match r.source {
-                    HitSource::Hot => "hot",
-                    HitSource::Archive => "archive",
-                    HitSource::Dag => "dag",
-                }
-                .to_string();
-                (r.memory_id, r.content, src)
-            })
-            .collect())
-    }
+    // Recall methods moved to commands::recall
 
     pub fn remember(&self, lobe: &str, key: Option<&str>, content: &str) -> Result<String> {
         record_action(
@@ -403,8 +302,8 @@ impl Commands {
 
         // 2) AUTO-PROMOTE RULE (count-based)
         //    Hot = total - archived (we reuse existing tiny helpers here).
-        let total = count_rows(&self.memory, Some(lobe_eff))?;
-        let archived = count_archived(&self.memory, Some(lobe_eff))?;
+        let total = crate::commands::helpers::count_rows(&self.memory, Some(lobe_eff))?;
+        let archived = crate::commands::helpers::count_archived(&self.memory, Some(lobe_eff))?;
         let hot = total.saturating_sub(archived);
 
         // 2a) AUTO-PRUNE (exact duplicates) after every write to keep hot store clean.
@@ -453,7 +352,7 @@ impl Commands {
         );
 
         let pool = self.memory.recent_summaries_by_lobe(lobe, window)?;
-        let note = compute_reflection(
+        let note = cmd::helpers::compute_reflection(
             &pool,
             self.config.policies.reflection_min_count,
             self.config.policies.reflection_max_keywords,
@@ -494,7 +393,7 @@ impl Commands {
             note.clone()
         };
 
-        if let Some(id) = latest_id_in_lobe(&self.memory, lobe)? {
+        if let Some(id) = cmd::helpers::latest_id_in_lobe(&self.memory, lobe)? {
             self.memory.set_reflection(&id, &governed_note)?;
             record_action("commands", "reflect_set", &json!({"id": id}), "low");
         } else {
@@ -512,10 +411,10 @@ impl Commands {
         record_action("commands", "stats_called", &json!({"lobe": lobe}), "low");
         let _ = precheck("stats_request", "metadata_access");
 
-        let total = count_rows(&self.memory, lobe)?;
-        let archived = count_archived(&self.memory, lobe)?;
-        let by_lobe = group_by_lobe(&self.memory, 20)?;
-        let last_updated = max_updated(&self.memory)?;
+        let total = cmd::helpers::count_rows(&self.memory, lobe)?;
+        let archived = cmd::helpers::count_archived(&self.memory, lobe)?;
+        let by_lobe = cmd::helpers::group_by_lobe(&self.memory, 20)?;
+        let last_updated = cmd::helpers::max_updated(&self.memory)?;
         record_action(
             "commands",
             "stats_returned",
@@ -535,42 +434,7 @@ impl Commands {
     // Replay (Rewind & Diverge) helpers exposed via Commands
     // ---------------------------------------------------------------------
 
-    /// Recall an immutable snapshot by content-addressed id (blake3 hex).
-    pub fn replay_recall_snapshot(&self, snapshot_id: &str) -> Result<DagMemoryState> {
-        // Read-only; no audit log to reduce noise.
-        self.memory.recall_snapshot(snapshot_id)
-    }
-
-    /// Create or reset a named path diverging from the given snapshot. Returns path_id.
-    pub fn replay_diverge_from(&self, snapshot_id: &str, path_name: &str) -> Result<String> {
-        let id = self.memory.diverge_from(snapshot_id, path_name)?;
-        record_action(
-            "commands",
-            "replay_diverge_from",
-            &json!({
-                "snapshot_id": snapshot_id,
-                "path_name": path_name,
-                "path_id": id
-            }),
-            "low",
-        );
-        Ok(id)
-    }
-
-    /// Append a new immutable snapshot to a named path and advance its head. Returns new hash.
-    pub fn replay_extend_path(&self, path_name: &str, state: DagMemoryState) -> Result<String> {
-        let new_id = self.memory.extend_path(path_name, state)?;
-        record_action(
-            "commands",
-            "replay_extend_path",
-            &json!({
-                "path_name": path_name,
-                "new_hash": new_id
-            }),
-            "low",
-        );
-        Ok(new_id)
-    }
+    // Replay helpers moved to commands::replay
 
     // ---------------------------------------------------------------------
     // High-level branch/append/consolidate APIs (idempotent, ethos-gated)
@@ -598,150 +462,27 @@ impl Commands {
         Ok(base)
     }
 
-    /// Fast-forward the target path to the source head.
-    /// Neuroscience: systems consolidation (stabilize the trace into 'cortex'/`dst_path`).
-    pub fn systems_consolidate(&self, src_path: &str, dst_path: &str) -> Result<String> {
-        let src_head = self.dag_head(src_path)?.ok_or(anyhow!("no src head"))?;
-        // If dst missing or behind: repoint head to src (FF). If already equal: noop.
-        if let Some(dst_head) = self.dag_head(dst_path)? {
-            if dst_head == src_head {
-                return Ok(src_head);
-            }
-            // Only fast-forward when ancestor; otherwise caller should request merge.
-            if crate::memory::dag::is_ancestor(&dst_head, &src_head)? {
-                self.update_path_head(dst_path, &src_head)?;
-            } else {
-                return Err(anyhow!("non-fast-forward: dst is not ancestor of src"));
-            }
-        } else {
-            // Create path at src head
-            self.update_path_head(dst_path, &src_head)?;
-        }
-        Ok(src_head)
-    }
+    // systems_consolidate moved to commands::replay
 
-    /// Create a merge snapshot with parents [main_head, feature_head] and move main to it.
+    /// Create a bind snapshot with parents [feature_head, main_head] and move main to it.
     /// Neuroscience: reconsolidation—integrate multiple traces into one memory.
-    /// Note: DAG presently supports single-parent. Until merge nodes are supported, this returns an error
-    /// when a fast-forward is not possible.
-    pub fn reconsolidate_paths(
-        &self,
-        main_path: &str,
-        feature_path: &str,
-        _note: &str,
-    ) -> Result<String> {
-        let main_head = self.dag_head(main_path)?.ok_or(anyhow!("no main head"))?;
-        let feat_head = self
-            .dag_head(feature_path)?
-            .ok_or(anyhow!("no feature head"))?;
-        if main_head == feat_head {
-            return Ok(main_head);
-        }
-        if crate::memory::dag::is_ancestor(&main_head, &feat_head)? {
-            self.update_path_head(main_path, &feat_head)?;
-            return Ok(feat_head);
-        }
-        Err(anyhow!(
-            "merge commits not yet supported; non-FF reconsolidation blocked"
-        ))
-    }
+    // reconsolidate_paths moved to commands::replay
 
     /// Idempotent, normalized: create a branch at a resolved base.
     /// base may be a snapshot hash or a path name; if None, lobe or 'main' are used.
-    pub fn branch(&self, path: &str, base: Option<&str>, lobe: Option<&str>) -> Result<String> {
-        let path_norm = self.normalize_path_name(path);
-        // If path exists already, return its recorded base snapshot id.
-        if crate::memory::dag::path_exists(&path_norm)? {
-            if let Some(b) = crate::memory::dag::path_base_snapshot(&path_norm)? {
-                return Ok(b);
-            }
-        }
-
-        // Resolve base: explicit hash or path, or by lobe/main fallback.
-        let resolved_base = if let Some(b) = base {
-            let b_norm = self.normalize_path_name(b);
-            // treat as path name if a path exists; else assume it's a cid
-            if crate::memory::dag::path_exists(&b_norm)? {
-                self.dag_head(&b_norm)?
-            } else {
-                Some(b.to_string())
-            }
-        } else if let Some(l) = lobe {
-            self.replay_base_from_lobe(l)?
-        } else if let Some(h) = self.dag_head("main")? {
-            Some(h)
-        } else {
-            self.replay_base_from_lobe("chat")?
-        }
-        .ok_or(anyhow!("no base available to branch from"))?;
-
-        let _ = self.replay_diverge_from(&resolved_base, &path_norm)?;
-        record_action(
-            "commands",
-            "branch_created",
-            &json!({ "path": path_norm, "base": resolved_base }),
-            "low",
-        );
-        Ok(resolved_base)
-    }
+    // branch moved to commands::replay
 
     /// Append content to a named path with provenance and ethos gating.
-    pub fn append(&self, path: &str, content: &str, meta: Option<Value>) -> Result<String> {
-        let path_norm = self.normalize_path_name(path);
-        if !crate::memory::dag::path_exists(&path_norm)? {
-            return Err(anyhow!(format!(
-                "path '{}' not found; call branch() first",
-                path_norm
-            )));
-        }
+    // append moved to commands::replay
 
-        // Governance: runtime enforcement for append content
-        let governed_text = if self.config.services.ethos_enabled {
-            match self.govern_text("replay_append", content) {
-                Ok(Some(s)) => s,
-                Ok(None) => return Err(anyhow!("blocked by runtime")),
-                Err(e) => return Err(anyhow!("runtime error: {}", e)),
-            }
-        } else {
-            content.to_string()
-        };
-
-        let parent = self.dag_head(&path_norm)?;
-        let base = crate::memory::dag::path_base_snapshot(&path_norm)?;
-        let enrich = json!({
-            "op": "append",
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "actor": "core",
-            "path": path_norm,
-            "parents": parent.clone().into_iter().collect::<Vec<_>>() ,
-            "base": base,
-            "content_hash": blake3::hash(governed_text.as_bytes()).to_hex().to_string(),
-        });
-        let merged_meta = match meta.unwrap_or_else(|| json!({})) {
-            Value::Object(mut m) => {
-                if let Value::Object(e) = enrich {
-                    m.extend(e);
-                }
-                Value::Object(m)
-            }
-            _ => enrich,
-        };
-        let state = DagMemoryState {
-            content: governed_text,
-            meta: merged_meta,
-        };
-        let id = self.replay_extend_path(&path_norm, state)?;
-        Ok(id)
-    }
-
-    /// Fast-forward if possible; else no-op with error until merges are supported.
+    /// Fast-forward if possible; else no-op with error until binds are supported.
     pub fn consolidate(&self, src_path: &str, dst_path: &str) -> Result<String> {
         self.systems_consolidate(src_path, dst_path)
     }
 
-    /// Placeholder for future two-parent merge support. Errors today if non-FF.
-    pub fn merge(&self, src_path: &str, dst_path: &str, note: &str) -> Result<String> {
-        let _ = note; // reserved for future merge-commit message
+    /// Placeholder for future two-parent bind support. Errors today if non-FF.
+    pub fn bind(&self, src_path: &str, dst_path: &str, note: &str) -> Result<String> {
+        let _ = note; // reserved for future bind-commit message
         self.reconsolidate_paths(dst_path, src_path, note)
     }
 
@@ -767,6 +508,11 @@ impl Commands {
     pub fn dag_cite_sources(&self, snapshot_id: &str) -> Result<Vec<serde_json::Value>> {
         // Read-only; no audit log.
         crate::memory::dag::cite_sources(snapshot_id)
+    }
+
+    /// Compute bind base (lowest common ancestor) between two snapshot hashes.
+    pub fn replay_bind_base(&self, a: &str, b: &str) -> Result<Option<String>> {
+        crate::memory::dag::bind_base(a, b)
     }
 
     /// Search DAG nodes by content words (case-insensitive), newest-first.
@@ -941,142 +687,17 @@ impl Commands {
 
     // -------- Centralized recall --------
 
-    /// Centralized recall: one function to rule them all.
-    /// Tries according to `Prefer`, returns the first hit with its source.
-    pub fn recall_any(&self, memory_id: &str, prefer: Prefer) -> Result<Option<RecallResult>> {
-        use Prefer::*;
-        let order: &[Prefer] = match prefer {
-            Hot => &[Hot],
-            Archive => &[Archive],
-            Dag => &[Dag],
-            Auto => &[Hot, Archive, Dag],
-        };
-
-        for tier in order {
-            match tier {
-                Prefer::Hot => {
-                    if let Some(bytes) = self.memory.recall(memory_id)? {
-                        return Ok(Some(RecallResult {
-                            memory_id: memory_id.to_owned(),
-                            content: bytes_to_string_owned(bytes),
-                            source: HitSource::Hot,
-                        }));
-                    }
-                }
-                Prefer::Archive => {
-                    if let Some(bytes) = self.librarian.fetch_cold(&self.memory, memory_id)? {
-                        return Ok(Some(RecallResult {
-                            memory_id: memory_id.to_owned(),
-                            content: bytes_to_string_owned(bytes),
-                            source: HitSource::Archive,
-                        }));
-                    }
-                    if let Some(_cid) = self.ensure_archive_for(memory_id)? {
-                        if let Some(bytes2) = self.librarian.fetch_cold(&self.memory, memory_id)? {
-                            return Ok(Some(RecallResult {
-                                memory_id: memory_id.to_owned(),
-                                content: bytes_to_string_owned(bytes2),
-                                source: HitSource::Archive,
-                            }));
-                        }
-                    }
-                }
-                Prefer::Dag => {
-                    if let Some(s) = crate::memory::dag::content_by_id(memory_id)? {
-                        return Ok(Some(RecallResult {
-                            memory_id: memory_id.to_owned(),
-                            content: s,
-                            source: HitSource::Dag,
-                        }));
-                    }
-                    // If DAG missing: ensure hot is present (restore from archive if needed), then promote this id to DAG
-                    if self.memory.recall(memory_id)?.is_none() {
-                        let _ = self.librarian.fetch_cold(&self.memory, memory_id)?;
-                    }
-                    if self.memory.recall(memory_id)?.is_some() {
-                        let _ = self.memory.promote_to_dag(memory_id);
-                        if let Some(s2) = crate::memory::dag::content_by_id(memory_id)? {
-                            if let Some(node) = crate::memory::dag::load_node_by_id(memory_id)? {
-                                let lobe = node
-                                    .get("lobe")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("restored");
-                                let key = node
-                                    .get("key")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("restored");
-                                self.memory.remember(memory_id, lobe, key, s2.as_bytes())?;
-                            }
-                            return Ok(Some(RecallResult {
-                                memory_id: memory_id.to_owned(),
-                                content: s2,
-                                source: HitSource::Dag,
-                            }));
-                        }
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
-        Ok(None)
-    }
-
-    /// Centralized batch recall (keeps order of input ids; drops misses).
-    pub fn recall_many(&self, memory_ids: &[String], prefer: Prefer) -> Result<Vec<RecallResult>> {
-        let mut out = Vec::with_capacity(memory_ids.len());
-        for id in memory_ids {
-            if let Some(hit) = self.recall_any(id, prefer)? {
-                out.push(hit);
-            }
-        }
-        Ok(out)
-    }
+    // recall_any/recall_many moved to commands::recall
 }
 
-// Prefer string shim (backwards compat)
-fn parse_prefer(s: Option<&str>) -> Prefer {
-    match s.unwrap_or("auto") {
-        "hot" => Prefer::Hot,
-        "archive" => Prefer::Archive,
-        "dag" => Prefer::Dag,
-        _ => Prefer::Auto,
-    }
-}
+// parse_prefer moved to commands::recall
 
-/// Tiny, deterministic keyword theme line (command-level helper).
-fn compute_reflection(summaries: &[String], min_count: usize, max_keywords: usize) -> String {
-    use std::collections::HashMap;
-    const STOP: &[&str] = &[
-        "the", "and", "for", "with", "that", "this", "from", "have", "are", "was", "were", "you",
-        "your", "but", "not", "into", "over", "under", "then", "than", "there", "about", "just",
-        "like", "they", "them", "their", "will", "would", "could", "has", "had", "can", "may",
-        "might", "should",
-    ];
-
-    let mut freq: HashMap<String, usize> = HashMap::new();
-    for s in summaries {
-        for t in s.split(|c: char| !c.is_alphanumeric()) {
-            let t = t.to_lowercase();
-            if t.len() < 3 || STOP.contains(&t.as_str()) {
-                continue;
-            }
-            *freq.entry(t).or_insert(0) += 1;
-        }
-    }
-    let mut toks: Vec<(String, usize)> =
-        freq.into_iter().filter(|(_, c)| *c >= min_count).collect();
-    toks.sort_by(|a, b| b.1.cmp(&a.1));
-    toks.truncate(max_keywords);
-    if toks.is_empty() {
-        return String::new();
-    }
-    let joined = toks
-        .into_iter()
-        .map(|(t, c)| format!("{t}({c})"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("Recurring themes: {joined}")
-}
+/// Minimal three-way bind at line granularity.
+/// - If both sides equal → keep
+/// - If left == base → take right
+/// - If right == base → take left
+/// - Else emit conflict block with Git-style markers
+// Three-way bind moved to crate::commands::bind
 
 #[derive(Debug, Serialize)]
 pub struct Stats {
@@ -1084,86 +705,4 @@ pub struct Stats {
     pub archived: u64,
     pub by_lobe: Vec<(String, u64)>,
     pub last_updated: Option<String>,
-}
-
-// ---------- tiny SQL helpers (read-only) ----------
-
-fn latest_id_in_lobe(memory: &Memory, lobe: &str) -> Result<Option<String>> {
-    let mut stmt = memory
-        .db
-        .prepare("SELECT memory_id FROM memories WHERE lobe=?1 ORDER BY updated_at DESC LIMIT 1")?;
-    let mut rows = stmt.query([lobe])?;
-    if let Some(r) = rows.next()? {
-        let id: String = r.get(0)?;
-        return Ok(Some(id));
-    }
-    Ok(None)
-}
-
-fn recent_ids_in_lobe(memory: &Memory, lobe: &str, limit: usize) -> Result<Vec<String>> {
-    let mut stmt = memory.db.prepare(
-        "SELECT memory_id
-         FROM memories
-         WHERE lobe = ?1
-         ORDER BY updated_at DESC
-         LIMIT ?2",
-    )?;
-    let rows = stmt.query_map((lobe, limit as i64), |r| r.get::<_, String>(0))?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-fn count_rows(memory: &Memory, lobe: Option<&str>) -> Result<u64> {
-    let sql = match lobe {
-        Some(_) => "SELECT COUNT(*) FROM memories WHERE lobe=?1",
-        None => "SELECT COUNT(*) FROM memories",
-    };
-    let mut stmt = memory.db.prepare(sql)?;
-    let cnt: i64 = match lobe {
-        Some(l) => stmt.query_row([l], |r| r.get(0))?,
-        None => stmt.query_row([], |r| r.get(0))?,
-    };
-    Ok(cnt as u64)
-}
-
-fn count_archived(memory: &Memory, lobe: Option<&str>) -> Result<u64> {
-    let sql = match lobe {
-        Some(_) => "SELECT COUNT(*) FROM memories WHERE lobe=?1 AND archived_cid IS NOT NULL",
-        None => "SELECT COUNT(*) FROM memories WHERE archived_cid IS NOT NULL",
-    };
-    let mut stmt = memory.db.prepare(sql)?;
-    let cnt: i64 = match lobe {
-        Some(l) => stmt.query_row([l], |r| r.get(0))?,
-        None => stmt.query_row([], |r| r.get(0))?,
-    };
-    Ok(cnt as u64)
-}
-
-fn group_by_lobe(memory: &Memory, limit: usize) -> Result<Vec<(String, u64)>> {
-    let mut stmt = memory.db.prepare(
-        "SELECT lobe, COUNT(*) as c FROM memories GROUP BY lobe ORDER BY c DESC LIMIT ?1",
-    )?;
-    let rows = stmt.query_map([limit as i64], |r| {
-        let l: String = r.get(0)?;
-        let c: i64 = r.get(1)?;
-        Ok((l, c as u64))
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-fn max_updated(memory: &Memory) -> Result<Option<String>> {
-    let mut stmt = memory.db.prepare("SELECT MAX(updated_at) FROM memories")?;
-    let mut rows = stmt.query([])?;
-    if let Some(r) = rows.next()? {
-        let ts: Option<String> = r.get(0)?;
-        return Ok(ts);
-    }
-    Ok(None)
 }

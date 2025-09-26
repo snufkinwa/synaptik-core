@@ -3,6 +3,7 @@
 use anyhow::Result;
 use serde::Serialize;
 use contracts::types::{ContractRule, MoralContract};
+use contracts::normalize::for_rules;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,25 +20,8 @@ pub struct StreamGateConfig {
     pub fail_closed_on_finalize: bool,
 }
 
-fn norm(s: &str) -> String {
-    // NOTE: Keep in sync with evaluator.rs normalization. Consider moving to a shared util.
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        // Drop control characters early.
-        if ch.is_control() {
-            continue;
-        }
-        // Use Unicode-aware lowercasing. Some chars expand to multiple codepoints.
-        for lc in ch.to_lowercase() {
-            match lc {
-                // Filter zero-width characters
-                '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
-                _ => out.push(lc),
-            }
-        }
-    }
-    out
-}
+// Normalization delegated to contracts::normalize to keep consistent with evaluator.
+fn norm(s: &str) -> String { for_rules(s) }
 
 /// Minimal evaluation result to satisfy your debug test
 #[derive(Debug, Clone)]
@@ -336,14 +320,51 @@ impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
         let mut buf = String::new();
         let mut violated: Option<String> = None;
 
+        // Precompute a conservative window size to remask on each token.
+        // Use normalized pattern lengths to cover cross-token matches; grow by a
+        // generous UTF-8 factor and clamp to avoid unbounded work.
+        let window_bytes: usize = constraints
+            .as_ref()
+            .map(|spec| {
+                let max_pat = spec
+                    .mask_rules
+                    .iter()
+                    .map(|p| crate::services::masking::norm_lower(p).chars().count())
+                    .max()
+                    .unwrap_or(0);
+                // Fallback minimum to catch short patterns; cap to keep cost bounded.
+                let margin = (max_pat.saturating_mul(8)).max(128).min(4096);
+                margin
+            })
+            .unwrap_or(0);
+
         while let Some(tok) = stream.next() {
             if let Some(spec) = &constraints {
+                // Detect stop phrase across token boundaries (buf + tok)
                 if hits_stop_phrase(&buf, &tok, &spec.stop_phrases) {
                     violated = Some("stop_phrase".to_string());
                     break;
                 }
-                let t = apply_masks(&tok, &spec.mask_rules);
-                buf.push_str(&t);
+
+                // Append raw token, then apply masking over a suffix window so
+                // patterns that straddle token boundaries are redacted without
+                // reprocessing the entire buffer each time.
+                buf.push_str(&tok);
+                if !spec.mask_rules.is_empty() {
+                    if window_bytes == 0 || buf.len() <= window_bytes {
+                        buf = crate::services::masking::apply_masks_ci(&buf, &spec.mask_rules);
+                    } else {
+                        let target = buf.len() - window_bytes;
+                        // Find nearest char boundary <= target.
+                        let mut start = 0usize;
+                        for (i, _) in buf.char_indices() { if i <= target { start = i; } else { break; } }
+                        let tail = buf[start..].to_string();
+                        let masked_tail = crate::services::masking::apply_masks_ci(&tail, &spec.mask_rules);
+                        buf.truncate(start);
+                        buf.push_str(&masked_tail);
+                    }
+                }
+
                 if token_limit_reached(&buf, spec.max_tokens) {
                     break;
                 }
@@ -391,41 +412,20 @@ fn prompt_compile(p: &Proposal, spec: Option<&ConstraintSpec>) -> String {
     lines.join("\n")
 }
 
-fn norm_lower(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        if ch.is_control() { continue; }
-        for lc in ch.to_lowercase() {
-            match lc { '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}, _ => out.push(lc) }
-        }
-    }
-    out
-}
+fn norm_lower(s: &str) -> String { for_rules(s) }
 
 fn hits_stop_phrase(buf: &str, tok: &str, stop_phrases: &[String]) -> bool {
     if stop_phrases.is_empty() { return false; }
-    let merged = format!("{}{}", buf, tok);
-    let hay = norm_lower(&merged);
+    let binding = format!("{}{}", buf, tok);
+    let hay = norm_lower(&binding);
     stop_phrases.iter().any(|s| !s.is_empty() && hay.contains(&norm_lower(s)))
 }
 
-fn apply_masks(tok: &str, mask_rules: &[String]) -> String {
-    if mask_rules.is_empty() { return tok.to_string(); }
-    let mut out = tok.to_string();
-    for pat in mask_rules {
-        if pat.is_empty() { continue; }
-        // simple case-insensitive substring replacement
-        let lower_pat = norm_lower(pat);
-        let mut idx = 0usize;
-        while let Some(pos) = norm_lower(&out[idx..]).find(&lower_pat) {
-            let start = idx + pos;
-            let end = start + out[start..].chars().take(pat.chars().count()).map(char::len_utf8).sum::<usize>();
-            out.replace_range(start..end, "[masked]");
-            idx = start + "[masked]".len();
-        }
-    }
-    out
-}
+// Build a normalized view (case / rule normalization) along with original byte spans.
+// Each produced normalized char corresponds to an original (start,end) span. Characters
+// removed by normalization (e.g., zero-width or control) emit no span entries so searches
+// cannot accidentally shift and reveal trailing suffixes.
+// normalized_chars_with_spans and apply_masks moved to crate::services::masking
 
 fn token_limit_reached(buf: &str, max_tokens: usize) -> bool {
     if max_tokens == 0 { return false; }

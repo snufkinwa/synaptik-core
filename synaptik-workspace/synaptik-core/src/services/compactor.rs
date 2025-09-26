@@ -4,8 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{CompactionPolicy, SummarizerKind};
 use crate::services::memory::{Memory, MemoryCandidate};
-use crate::services::ethos::{precheck, decision_gate, Decision};
+use crate::commands::init::ensure_initialized_once;
+use contracts::{EvaluationResult, MoralContract, Verdict};
+use contracts::evaluator::load_or_default;
+use contracts::{evaluate_input_against_rules};
 use crate::utils::pons::PonsStore;
+use contracts::capsule::{SimCapsule, CapsuleMeta, CapsuleSource};
+use contracts::api::CapsAnnot;
+use contracts::store::ContractsStore;
+use once_cell::sync::OnceCell;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompactionReport {
@@ -138,37 +145,79 @@ impl<'a> Compactor<'a> {
                 }
             };
 
-            // Ethos / safety precheck via centralized contracts (best-effort).
-            let (ok, reason, risk) = self.ethos_precheck(&summary)?;
-            if !ok {
-                match (risk, reason) {
-                    (Some(risk), Some(reason)) => {
-                        report
-                            .notes
-                            .push(format!("ethos rejected summary {}: {} - {}", c.id, risk, reason));
+            // Contracts evaluation for the derived summary; support AllowWithPatch masks.
+            let verdict = self.eval_summary_with_contracts(&summary)?;
+            let mut final_summary = summary.clone();
+            let (verdict_variant, risk_score, _reason_opt, patched_applied) = {
+                match verdict {
+                    (Verdict::Allow, _pat, risk, reason) => (Verdict::Allow, risk, reason, false),
+                    (Verdict::AllowWithPatch, Some(patterns), risk, reason) => {
+                        final_summary = crate::services::masking::apply_masks_ci(&final_summary, &patterns);
+                        report.notes.push(format!(
+                            "patched summary {} with {} mask(s)",
+                            c.id,
+                            patterns.len()
+                        ));
+                        (Verdict::AllowWithPatch, risk, reason, true)
                     }
-                    (Some(risk), None) => {
-                        report
-                            .notes
-                            .push(format!("ethos rejected summary {}: {}", c.id, risk));
+                    (Verdict::AllowWithPatch, None, risk, reason) => {
+                        (Verdict::AllowWithPatch, risk, reason, false)
                     }
-                    (None, Some(reason)) => {
-                        report
-                            .notes
-                            .push(format!("ethos rejected summary {}: {}", c.id, reason));
-                    }
-                    _ => {
-                        report
-                            .notes
-                            .push(format!("ethos rejected summary {}", c.id));
+                    (Verdict::Quarantine, _p, risk, reason) => {
+                        // Preserve legacy wording expected by tests.
+                        report.notes.push(match reason.clone() {
+                            Some(r) => format!("ethos rejected summary {} (risk={:.2}): {}", c.id, risk, r),
+                            None => format!("ethos rejected summary {} (risk={:.2})", c.id, risk),
+                        });
+                        report.regrets += 1;
+                        continue; // Skip replace & ingestion
                     }
                 }
-                report.regrets += 1;
-                continue;
+            };
+
+            // Ingest AFTER masking so stored capsule matches persisted memory row.
+            if let Some(store) = contracts_store() {
+                let parent_id = store.capsule_for_memory(&c.id).ok().flatten();
+                let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                let labels = match (verdict_variant.clone(), patched_applied) {
+                    (Verdict::Allow, _) => vec!["summary".into()],
+                    (Verdict::AllowWithPatch, true) => vec!["summary".into(), "patched".into()],
+                    (Verdict::AllowWithPatch, false) => vec!["summary".into()],
+                    (Verdict::Quarantine, _) => vec!["summary".into()], // Should not occur here due to continue.
+                };
+                let cap = SimCapsule {
+                    inputs: serde_json::json!({}),
+                    context: serde_json::json!({ "lobe": lobe, "memory_id": c.id, "parent_capsule_id": parent_id }),
+                    actions: serde_json::json!(["compaction_summarize"]),
+                    outputs: serde_json::json!({ "summary": final_summary }),
+                    trace: serde_json::json!({ "summarizer": summarizer.as_str(), "orig_len": original.len(), "sum_len": final_summary.len(), "patched": patched_applied }),
+                    artifacts: vec![],
+                    meta: CapsuleMeta {
+                        capsule_id: None,
+                        agent_id: Some("core".to_string()),
+                        lobe: Some(lobe.to_string()),
+                        t_start_ms: now_ms,
+                        t_end_ms: now_ms,
+                        source: CapsuleSource::Derived,
+                        schema_ver: "1.0".to_string(),
+                        capsule_hash: None,
+                        issuer_signature: None,
+                        parent_id,
+                    },
+                };
+                let store_clone = store.clone();
+                let mem_id = c.id.clone();
+                let annot = CapsAnnot { verdict: verdict_variant, risk: risk_score, labels, policy_ver: "default".into(), patch_id: None, ts_ms: now_ms };
+                std::thread::spawn(move || {
+                    if let Ok(handle) = store_clone.ingest_capsule(cap) {
+                        let _ = store_clone.map_memory(&mem_id, &handle.id);
+                        let _ = store_clone.annotate(&handle.id, &annot);
+                    }
+                });
             }
 
-            // Replace memory content with summary (original archived/sidecar).
-            if let Err(e) = self.memory.replace_with_summary(&c.id, &summary) {
+            // Replace memory content with final (possibly patched) summary (original archived/sidecar).
+            if let Err(e) = self.memory.replace_with_summary(&c.id, &final_summary) {
                 report.notes.push(format!("replace_with_summary failed {}: {}", c.id, e));
                 report.regrets += 1;
                 continue;
@@ -192,7 +241,7 @@ impl<'a> Compactor<'a> {
         // Prefer explicit policy field if present (Option A).
         #[allow(clippy::match_like_matches_macro)]
         {
-            // if you used Option B (accessor), uncomment next lines:
+            // if used Option B (accessor), uncomment next lines:
             // if let Some(kind) = policy.summarizer_kind() {
             //     return kind;
             // }
@@ -235,20 +284,73 @@ impl<'a> Compactor<'a> {
         ))
     }
 
-    fn ethos_precheck(&self, summary: &str) -> Result<(bool, Option<String>, Option<String>)> {
-        // Delegate to the shared ethos precheck to avoid duplicated logic.
-        // If contracts evaluation fails, default to allow (keep pipeline robust).
-        match precheck(summary, "compaction_summary") {
-            Ok(verdict) => {
-                let dec = decision_gate(&verdict);
-                let allowed = !matches!(dec, Decision::Block);
-                if allowed {
-                    Ok((true, None, None))
-                } else {
-                    Ok((false, Some(verdict.reason), Some(verdict.risk)))
-                }
+    fn eval_summary_with_contracts(&self, summary: &str) -> Result<(Verdict, Option<Vec<String>>, f32, Option<String>)> {
+        // Load default contract from configured directory and evaluate text.
+        let cfg = ensure_initialized_once()?.config.clone();
+        let contract_path = cfg.contracts.path.join(&cfg.contracts.default_contract);
+    let mc: MoralContract = load_or_default(contract_path.to_string_lossy().as_ref());
+        let res: EvaluationResult = evaluate_input_against_rules(summary, &mc);
+
+        // Map severity to a simple risk score for scaffolding.
+        fn sev_rank(s: Option<&str>) -> i32 {
+            match s.unwrap_or("").to_ascii_lowercase().as_str() {
+                "critical" => 4,
+                "high" => 3,
+                "medium" => 2,
+                "low" => 1,
+                _ => 0,
             }
-            Err(_e) => Ok((true, None, None)),
+        }
+        fn sev_to_risk(rank: i32) -> f32 {
+            match rank { 4 => 1.0, 3 => 0.75, 2 => 0.5, 1 => 0.25, _ => 0.0 }
+        }
+
+        if res.passed {
+            return Ok((Verdict::Allow, None, 0.0, None));
+        }
+
+        // If any constraint encodes a mask directive, treat as AllowWithPatch; else Quarantine.
+        let mut mask_patterns: Vec<String> = Vec::new();
+        for c in &res.constraints {
+            let t = c.trim();
+            if let Some(stripped) = t.strip_prefix("mask:") {
+                let p = stripped.trim();
+                if !p.is_empty() { mask_patterns.push(p.to_string()); }
+            } else if let Some(stripped) = t.strip_prefix("redact:") {
+                let p = stripped.trim();
+                if !p.is_empty() { mask_patterns.push(p.to_string()); }
+            }
+        }
+
+        let mut max_rank = 0;
+        for r in &res.violated_rules {
+            let rank = sev_rank(r.severity.as_deref());
+            if rank > max_rank { max_rank = rank; }
+        }
+        let risk = sev_to_risk(max_rank);
+        let reason = res.reason.clone();
+
+        if !mask_patterns.is_empty() {
+            Ok((Verdict::AllowWithPatch, Some(mask_patterns), risk, Some(reason)))
+        } else {
+            Ok((Verdict::Quarantine, None, risk, Some(reason)))
         }
     }
 }
+
+// -------------------- Contracts Store helper --------------------
+
+fn contracts_store() -> Option<&'static ContractsStore> {
+    static CELL: OnceCell<Option<ContractsStore>> = OnceCell::new();
+    CELL.get_or_init(|| {
+        let root = ensure_initialized_once()
+            .map(|r| r.config.contracts.path.join("caps_store"))
+            .ok();
+        match root {
+            Some(dir) => ContractsStore::new(dir).ok(),
+            None => None,
+        }
+    }).as_ref()
+}
+
+// Masking helpers are centralized in crate::services::masking

@@ -304,8 +304,8 @@ def ff_api(mem: MemoryBridge) -> None:
         print(f"   • set_engram_head({scratch} = base) → {scratch_head[:8]}…")
 
         # Reconsolidate cortex to the latest feature head (FF)
-        merged = cmd.reconsolidate_paths(src_path=feature, dst_path="cortex", note="demo")
-        print(f"   • reconsolidate_paths({feature} → cortex) = {merged[:8]}… (FF)")
+        binding = cmd.reconsolidate_paths(src_path=feature, dst_path="cortex", note="demo")
+        print(f"   • reconsolidate_paths({feature} → cortex) = {binding[:8]}… (FF)")
 
     except Exception as e:
         print(f"   ⚠ New API demo skipped: {e}")

@@ -1,5 +1,10 @@
 // src/commands/mod.rs
 mod api;
+pub mod helpers;
+pub mod bind;
+pub mod replay;
+pub mod recall;
+pub mod pons;
 pub mod init;
 
 use serde::Serialize;

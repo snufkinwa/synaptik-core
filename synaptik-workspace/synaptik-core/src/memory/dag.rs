@@ -6,8 +6,10 @@
 //!    • stream = (lobe, key) from meta
 //!    • compute h = blake3(content_utf8 bytes)
 //!    • if last_hash(stream) == h -> NO new node (return latest node id)
-//!    • else write a node file with parent = latest(stream), update stream ref
-//! - Parent is stored inline; no edge files.
+//!    • else write a node file with parents = [latest(stream), ...], update stream ref
+//! - Parents are stored inline as an ordered array (primary first). For backward
+//!   compatibility, older nodes may contain a single `parent` string; readers map it
+//!   to `parents = [parent]`.
 
 use anyhow::{Context, Result, anyhow};
 use blake3;
@@ -42,6 +44,12 @@ fn ids_ref_dir() -> Result<PathBuf> {
 
 fn hashes_ref_dir() -> Result<PathBuf> {
     let p = ensure_initialized_once()?.root.join("refs").join("hashes");
+    fs::create_dir_all(&p)?;
+    Ok(p)
+}
+
+fn children_ref_dir() -> Result<PathBuf> {
+    let p = ensure_initialized_once()?.root.join("refs").join("children");
     fs::create_dir_all(&p)?;
     Ok(p)
 }
@@ -163,6 +171,74 @@ fn read_hash_index(hash: &str) -> Result<Option<HashIndex>> {
     Ok(Some(idx))
 }
 
+// ---------- parents helpers & optional reverse index ----------
+
+fn read_children_index(hash: &str) -> Result<Vec<String>> {
+    let p = children_ref_dir()?.join(format!("{}.json", sanitize(hash)));
+    if !p.exists() { return Ok(Vec::new()); }
+    let bytes = fs::read(&p)?;
+    let arr: Vec<String> = serde_json::from_slice(&bytes).unwrap_or_default();
+    Ok(arr)
+}
+
+fn write_children_index(hash: &str, children: &[String]) -> Result<()> {
+    let p = children_ref_dir()?.join(format!("{}.json", sanitize(hash)));
+    write_atomic(&p, &serde_json::to_vec_pretty(children)?)
+}
+
+fn append_child_to_parent(hash: &str, child_node: &str) -> Result<()> {
+    let mut arr = read_children_index(hash)?;
+    if !arr.iter().any(|s| s == child_node) {
+        arr.push(child_node.to_string());
+        arr.sort();
+        write_children_index(hash, &arr)?;
+    }
+    Ok(())
+}
+
+// Back-compat helper: extract ordered parents (filenames or hashes).
+fn node_parents_list(v: &Value) -> Vec<String> {
+    if let Some(arr) = v.get("parents").and_then(|x| x.as_array()) {
+        let mut out = Vec::new();
+        for it in arr {
+            if let Some(s) = it.as_str() { if !s.is_empty() { out.push(s.to_string()); } }
+        }
+        return out;
+    }
+    if let Some(p) = v.get("parent").and_then(|x| x.as_str()) { if !p.is_empty() { return vec![p.to_string()]; } }
+    Vec::new()
+}
+
+fn parent_filenames_from_node(v: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in node_parents_list(v) {
+        if p.ends_with(".json") { out.push(p); }
+        else if let Some(fname) = resolve_parent_filename(&p).ok().flatten() { out.push(fname); }
+    }
+    out
+}
+
+// Fallback parent filename resolver: first consult hash index; if missing, scan dag nodes directory
+// for a JSON file whose internal "hash" matches the requested parent hash. Returns filename if found.
+fn resolve_parent_filename(parent_hash: &str) -> Result<Option<String>> {
+    if let Some(idx) = read_hash_index(parent_hash)? { return Ok(Some(idx.node)); }
+    let dir = match dag_nodes_dir() { Ok(d) => d, Err(_) => return Ok(None) };
+    let entries = match fs::read_dir(&dir) { Ok(e) => e, Err(_) => return Ok(None) };
+    for ent in entries.flatten() {
+        let p = ent.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+        if let Some(fname) = p.file_name().and_then(|n| n.to_str()) {
+            match load_node(&fname.to_string()) {
+                Ok(v) => {
+                    if let Some(h) = v.get("hash").and_then(|x| x.as_str()) { if h == parent_hash { return Ok(Some(fname.to_string())); } }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+    Ok(None)
+}
+
 // ---------- public API (used by Memory) ----------
 
 /// Save a node for (lobe,key) stream if content changed. Returns the node file name.
@@ -198,10 +274,11 @@ pub fn save_node(
     let fname = format!("{}__{}.json", ts.replace(':', "-"), sanitize(id));
     let node_path = dag_nodes_dir()?.join(&fname);
 
-    let parent = if !parents.is_empty() {
-        Some(parents[0].clone())
+    // Determine ordered parents list (primary first). If none provided, default to current head.
+    let parent_list: Vec<String> = if !parents.is_empty() {
+        parents.to_vec()
     } else {
-        sref.latest_node.clone()
+        sref.latest_node.clone().into_iter().collect()
     };
 
     // Merge provided meta (if object) with our required fields. Always update updated_at and cid/hash.
@@ -233,7 +310,7 @@ pub fn save_node(
         "ts": ts,
         "lobe": lobe,
         "key": key,
-        "parent": parent,
+        "parents": parent_list,
         "hash": h,
         "content": content_utf8,
         "meta": Value::Object(meta_obj),
@@ -249,6 +326,15 @@ pub fn save_node(
     // Maintain quick indexes to avoid directory scans.
     let _ = write_id_index(id, &fname, lobe, key);
     let _ = write_hash_index(&h, &fname);
+
+    // Update reverse index: record this node as a child of each parent (by parent hash).
+    for pf in parent_filenames_from_node(&node) {
+        if let Ok(pnode) = load_node(&pf) {
+            if let Some(ph) = pnode.get("hash").and_then(|x| x.as_str()) {
+                let _ = append_child_to_parent(ph, &fname);
+            }
+        }
+    }
 
     Ok(fname)
 }
@@ -584,34 +670,31 @@ pub fn set_path_head(path_name: &str, snapshot_hash: &str) -> Result<()> {
 
 /// Return true if `ancestor_hash` is on the ancestor chain of `descendant_hash` (or equal).
 pub fn is_ancestor(ancestor_hash: &str, descendant_hash: &str) -> Result<bool> {
-    if ancestor_hash == descendant_hash {
-        return Ok(true);
-    }
-    // Resolve descendant to filename
-    let mut cur = if let Some(idx) = read_hash_index(descendant_hash)? {
-        Some(idx.node)
-    } else {
-        None
-    };
-    while let Some(fname) = cur {
+    if ancestor_hash == descendant_hash { return Ok(true); }
+    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    if let Some(idx) = read_hash_index(descendant_hash)? { queue.push_back(idx.node); }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(fname) = queue.pop_front() {
+        if !seen.insert(fname.clone()) { continue; }
         let node = load_node(&fname)?;
-        if node.get("hash").and_then(|x| x.as_str()) == Some(ancestor_hash) {
-            return Ok(true);
-        }
-        let parent = node.get("parent").and_then(|x| x.as_str());
-        cur = if let Some(p) = parent {
-            if p.is_empty() {
-                None
-            } else if p.ends_with(".json") {
-                Some(p.to_string())
-            } else if let Some(idx) = read_hash_index(p)? {
-                Some(idx.node)
+        if node.get("hash").and_then(|x| x.as_str()) == Some(ancestor_hash) { return Ok(true); }
+        for p in node_parents_list(&node) {
+            if p.is_empty() { continue; }
+            if p.ends_with(".json") {
+                queue.push_back(p);
+            } else if let Some(idx) = read_hash_index(&p)? {
+                queue.push_back(idx.node);
             } else {
-                None
+                // Attempt fallback resolution: scan for a node whose internal hash matches `p`.
+                if let Some(fname) = resolve_parent_filename(&p).ok().flatten() {
+                    queue.push_back(fname);
+                } else {
+                    // Retain raw hash only if resolution failed; later iterations cannot load it directly
+                    // but this preserves prior behavior for completeness.
+                    queue.push_back(p);
+                }
             }
-        } else {
-            None
-        };
+        }
     }
     Ok(false)
 }
@@ -628,7 +711,8 @@ pub fn children_of(filename: &str) -> Result<Vec<String>> {
         }
         let bytes = fs::read(&path)?;
         if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-            if v.get("parent").and_then(|x| x.as_str()) == Some(filename) {
+            let parents = parent_filenames_from_node(&v);
+            if parents.iter().any(|p| p == filename) {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     kids.push(name.to_string());
                 }
@@ -653,7 +737,7 @@ pub struct PruneReport {
 ///
 /// Multiple DAG nodes can share the same content hash (e.g. different lobes
 /// remembering identical content). Rather than relying on a single hash index
-/// entry, scan for all matching nodes and merge their metadata, prioritising
+/// entry, scan for all matching nodes and bind their metadata, prioritising
 /// the indexed node when available.
 pub fn snapshot_meta(snapshot_id: &str) -> Result<Value> {
     let mut metas: Vec<serde_json::Map<String, Value>> = Vec::new();
@@ -699,21 +783,21 @@ pub fn snapshot_meta(snapshot_id: &str) -> Result<Value> {
         return Err(anyhow!("snapshot not found: {}", snapshot_id));
     }
 
-    let mut merged = metas.remove(0);
+    let mut binding = metas.remove(0);
     for meta in metas.iter() {
-        merge_meta_maps(&mut merged, meta);
+        bind_meta_maps(&mut binding, meta);
     }
 
-    Ok(Value::Object(merged))
+    Ok(Value::Object(binding))
 }
 
-fn merge_meta_maps(
+fn bind_meta_maps(
     base: &mut serde_json::Map<String, Value>,
     incoming: &serde_json::Map<String, Value>,
 ) {
     for (k, v) in incoming {
         if k == "provenance" {
-            merge_provenance(base, v);
+            bind_provenance(base, v);
             continue;
         }
         let should_set = !base.contains_key(k)
@@ -727,7 +811,7 @@ fn merge_meta_maps(
     }
 }
 
-fn merge_provenance(base: &mut serde_json::Map<String, Value>, incoming: &Value) {
+fn bind_provenance(base: &mut serde_json::Map<String, Value>, incoming: &Value) {
     let incoming_obj = match incoming.as_object() {
         Some(map) => map,
         None => return,
@@ -741,25 +825,25 @@ fn merge_provenance(base: &mut serde_json::Map<String, Value>, incoming: &Value)
     }
     let prov_map = prov_entry.as_object_mut().expect("provenance object");
 
-    let mut merged_sources: Vec<Value> = prov_map
+    let mut bindd_sources: Vec<Value> = prov_map
         .get("sources")
         .and_then(|s| s.as_array())
         .map(|arr| arr.clone())
         .unwrap_or_else(Vec::new);
 
     let mut seen: std::collections::HashSet<String> =
-        merged_sources.iter().map(provenance_source_key).collect();
+        bindd_sources.iter().map(provenance_source_key).collect();
 
     if let Some(new_sources) = incoming_obj.get("sources").and_then(|s| s.as_array()) {
         for src in new_sources {
             let key = provenance_source_key(src);
             if seen.insert(key) {
-                merged_sources.push(src.clone());
+                bindd_sources.push(src.clone());
             }
         }
     }
 
-    prov_map.insert("sources".to_string(), Value::Array(merged_sources));
+    prov_map.insert("sources".to_string(), Value::Array(bindd_sources));
 
     for (k, value) in incoming_obj {
         if k == "sources" {
@@ -831,40 +915,13 @@ pub fn trace_path(path_name: &str, limit: usize) -> Result<Vec<Value>> {
             "provenance_sources": prov_count,
         });
         out.push(item);
-        // Parent may be stored as a node filename or as a content hash. Support both formats.
-        let parent_field = node.get("parent").and_then(|x| x.as_str());
-        let next_parent: Option<String> = if let Some(p) = parent_field {
-            if p.is_empty() {
-                None
-            } else if p.ends_with(".json") {
-                Some(p.to_string())
-            } else {
-                // Treat as content hash; resolve via index, then fallback to a scan
-                if let Some(idx) = read_hash_index(p)? {
-                    Some(idx.node)
-                } else {
-                    let dir = dag_nodes_dir()?;
-                    let mut found: Option<String> = None;
-                    for e in fs::read_dir(&dir)? {
-                        let path = e?.path();
-                        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                            continue;
-                        }
-                        let bytes = fs::read(&path)?;
-                        if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                            if v.get("hash").and_then(|x| x.as_str()) == Some(p) {
-                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                    found = Some(name.to_string());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    found
-                }
-            }
-        } else {
-            None
+        // Choose the primary parent if multiple; prefer the first entry in `parents`.
+        let next_parent: Option<String> = {
+            let parents = node_parents_list(&node);
+            if let Some(p) = parents.first() {
+                if p.ends_with(".json") { Some(p.clone()) }
+                else if let Some(idx) = read_hash_index(p)? { Some(idx.node) } else { None }
+            } else { None }
         };
         cur = next_parent;
         n += 1;
@@ -932,4 +989,81 @@ pub fn prune(keep_last_per_stream: usize) -> Result<PruneReport> {
         kept: examined.saturating_sub(removed),
         removed,
     })
+}
+
+// ---------- Merge helpers ----------
+
+/// Compute the bind base (lowest common ancestor) between two snapshot hashes.
+/// Returns Some(ancestor_hash) if found.
+pub fn bind_base(a_hash: &str, b_hash: &str) -> Result<Option<String>> {
+    if a_hash == b_hash { return Ok(Some(a_hash.to_string())); }
+    // Collect ancestors of A (by hash), including A.
+    let mut aset: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut qa: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    if let Some(idx) = read_hash_index(a_hash)? {
+        qa.push_back(idx.node);
+    } else {
+        // Fallback: scan dag_nodes_dir for a file whose internal "hash" matches a_hash
+        if let Ok(dir) = dag_nodes_dir() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for ent in entries.flatten() {
+                    let p = ent.path();
+                    if p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+                    if let Ok(v) = load_node(&p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()) {
+                        if let Some(h) = v.get("hash").and_then(|x| x.as_str()) {
+                            if h == a_hash {
+                                if let Some(fname) = p.file_name().and_then(|n| n.to_str()) { qa.push_back(fname.to_string()); }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    while let Some(fname) = qa.pop_front() {
+        let node = match load_node(&fname) { Ok(n) => n, Err(_) => continue };
+        if let Some(h) = node.get("hash").and_then(|x| x.as_str()) { aset.insert(h.to_string()); }
+        for p in node_parents_list(&node) {
+            if p.ends_with(".json") { qa.push_back(p); }
+            else if let Some(idx) = read_hash_index(&p)? { qa.push_back(idx.node); }
+            else if let Some(fname) = resolve_parent_filename(&p).ok().flatten() { qa.push_back(fname); }
+        }
+    }
+    // BFS from B until hitting any in A's ancestor set (nearest to B wins).
+    let mut qb: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(idx) = read_hash_index(b_hash)? {
+        qb.push_back(idx.node);
+    } else {
+        if let Ok(dir) = dag_nodes_dir() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for ent in entries.flatten() {
+                    let p = ent.path();
+                    if p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+                    if let Ok(v) = load_node(&p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()) {
+                        if let Some(h) = v.get("hash").and_then(|x| x.as_str()) {
+                            if h == b_hash {
+                                if let Some(fname) = p.file_name().and_then(|n| n.to_str()) { qb.push_back(fname.to_string()); }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    while let Some(fname) = qb.pop_front() {
+        if !seen.insert(fname.clone()) { continue; }
+        let node = match load_node(&fname) { Ok(n) => n, Err(_) => continue };
+        if let Some(h) = node.get("hash").and_then(|x| x.as_str()) {
+            if aset.contains(h) { return Ok(Some(h.to_string())); }
+        }
+        for p in node_parents_list(&node) {
+            if p.ends_with(".json") { qb.push_back(p); }
+            else if let Some(idx) = read_hash_index(&p)? { qb.push_back(idx.node); }
+            else if let Some(fname) = resolve_parent_filename(&p).ok().flatten() { qb.push_back(fname); }
+        }
+    }
+    Ok(None)
 }

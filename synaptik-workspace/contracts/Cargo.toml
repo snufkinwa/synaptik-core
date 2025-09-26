@@ -10,7 +10,8 @@ include = ["src/**", "assets/**", "Cargo.toml"]
 crate-type = ["rlib", "cdylib"]
 
 [features]
-wasm = ["wasm-bindgen"]
+# wasm feature enables wasm-bindgen plus JS getrandom support for rand
+wasm = ["wasm-bindgen", "getrandom/js"]
 
 [dependencies]
 wasm-bindgen = { version = "0.2", optional = true }
@@ -21,3 +22,6 @@ anyhow = "1.0"
 sha2 = "0.10"
 ed25519-dalek = "1"
 blake3 = "1"
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+getrandom = { version = "0.2", optional = true }
+thiserror = "1.0"

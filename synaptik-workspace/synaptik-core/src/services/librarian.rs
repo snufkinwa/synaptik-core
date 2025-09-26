@@ -14,6 +14,13 @@ use crate::config::PoliciesConfig;
 use crate::services::archivist::Archivist;
 use crate::services::audit::record_action;
 use crate::services::memory::Memory;
+use crate::commands::init::ensure_initialized_once;
+
+// Contracts integration (SimCapsules)
+use contracts::api::{Purpose};
+use contracts::capsule::{SimCapsule, CapsuleMeta, CapsuleSource};
+use contracts::store::ContractsStore;
+use once_cell::sync::OnceCell;
 
 #[derive(Debug)]
 pub struct Librarian {
@@ -128,6 +135,40 @@ impl Librarian {
             "low",
         );
 
+        // Assemble a minimal SimCapsule and ingest asynchronously (best-effort).
+        // Non-blocking: errors are swallowed after logging.
+        if let Some(store) = contracts_store() {
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let cap = SimCapsule {
+                inputs: serde_json::Value::Null,
+                context: serde_json::json!({ "lobe": lobe, "key": key }),
+                actions: serde_json::json!(["ingest_text"]),
+                outputs: serde_json::json!({ "text": content }),
+                trace: serde_json::json!({ "summary_len": summary.len(), "reflected": reflection.is_some() }),
+                artifacts: vec![],
+                meta: CapsuleMeta {
+                    capsule_id: None,
+                    agent_id: Some("core".to_string()),
+                    lobe: Some(lobe.to_string()),
+                    t_start_ms: now_ms,
+                    t_end_ms: now_ms,
+                    source: CapsuleSource::Real,
+                    schema_ver: "1.0".to_string(),
+                    capsule_hash: None,
+                    issuer_signature: None,
+                    parent_id: None,
+                },
+            };
+            // Spawn a lightweight thread to avoid blocking the caller.
+            let store_clone = store.clone();
+            let mem_id = memory_id.clone();
+            std::thread::spawn(move || {
+                if let Ok(handle) = store_clone.ingest_capsule(cap) {
+                    let _ = store_clone.map_memory(&mem_id, &handle.id);
+                }
+            });
+        }
+
         Ok(memory_id)
     }
 
@@ -156,6 +197,20 @@ impl Librarian {
     // Fetch with hot->cold path (kept for general callers).
     pub fn fetch(&self, memory: &Memory, memory_id: &str) -> Result<Option<Vec<u8>>> {
         if let Some(bytes) = memory.recall(memory_id)? {
+            // Contracts gate: only gate when exposing to caller.
+            if let Some(store) = contracts_store() {
+                if let Ok(Some(caps_id)) = store.capsule_for_memory(memory_id) {
+                    if let Err(denied) = store.gate_replay(&caps_id, Purpose::Replay) {
+                        record_action(
+                            "librarian",
+                            "gate_denied",
+                            &json!({"memory_id": memory_id, "capsule_id": caps_id, "reason": denied.reason }),
+                            "high",
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
             crate::services::audit::record_action(
                 "librarian",
                 "memory_accessed_hot",
@@ -164,7 +219,24 @@ impl Librarian {
             );
             return Ok(Some(bytes));
         }
-        self.fetch_cold(memory, memory_id)
+        let cold = self.fetch_cold(memory, memory_id)?;
+        if cold.is_some() {
+            // Gate cold recall as well
+            if let Some(store) = contracts_store() {
+                if let Ok(Some(caps_id)) = store.capsule_for_memory(memory_id) {
+                    if let Err(denied) = store.gate_replay(&caps_id, Purpose::Replay) {
+                        record_action(
+                            "librarian",
+                            "gate_denied",
+                            &json!({"memory_id": memory_id, "capsule_id": caps_id, "reason": denied.reason }),
+                            "high",
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        Ok(cold)
     }
 
     /// Fetch only from cold storage via Archivist if a CID exists; re-caches on success.
@@ -211,6 +283,21 @@ impl Librarian {
         }
         Ok(None)
     }
+}
+
+// -------------------- Contracts Store helper --------------------
+
+fn contracts_store() -> Option<&'static ContractsStore> {
+    static CELL: OnceCell<Option<ContractsStore>> = OnceCell::new();
+    CELL.get_or_init(|| {
+        let root = ensure_initialized_once()
+            .map(|r| r.config.contracts.path.join("caps_store"))
+            .ok();
+        match root {
+            Some(dir) => ContractsStore::new(dir).ok(),
+            None => None,
+        }
+    }).as_ref()
 }
 
 #[derive(Debug, Clone)]

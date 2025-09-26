@@ -82,6 +82,37 @@ fn mask_rules_redact_case_insensitive() {
 }
 
 #[test]
+fn mask_rules_redact_across_token_boundaries() {
+    let spec = ConstraintSpec {
+        mask_rules: vec!["secret".into()],
+        allow_tools: vec![],
+        stop_phrases: vec![],
+        max_tokens: 256,
+        temperature_cap: 0.7,
+    };
+    let contract = FixedContract { spec: Some(spec) };
+    // Split the sensitive phrase across tokens to ensure cross-boundary masking.
+    let model = VecModel { toks: vec![
+        "the ".into(),
+        "se".into(),
+        "Cr".into(),
+        "Et ".into(),
+        "code".into(),
+    ] };
+    let rt = StreamRuntime { contract, model };
+
+    let res = rt.generate(proposal("memory_storage", "irrelevant"))
+        .expect("generate");
+    assert_eq!(res.status, FinalizedStatus::Ok);
+    assert!(res.text.contains("[masked]"), "masked output should contain [masked], got: {}", res.text);
+    assert!(
+        !res.text.to_ascii_lowercase().contains("secret"),
+        "masked pattern should not appear even across tokens: {}",
+        res.text
+    );
+}
+
+#[test]
 fn stop_phrase_triggers_violation_and_early_stop() {
     let spec = ConstraintSpec {
         mask_rules: vec![],
@@ -129,4 +160,3 @@ fn runtime_proceed_passthrough() {
     assert_eq!(res.status, FinalizedStatus::Ok);
     assert_eq!(res.text, "hello world");
 }
-

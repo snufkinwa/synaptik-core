@@ -35,7 +35,7 @@ pub struct ContractRule {
     #[serde(default)]
     pub severity: Option<String>,
 
-    // NEW: optional soft guidance tags (merged into the result)
+    // NEW: optional soft guidance tags (binding into the result)
     #[serde(default)]
     pub constraints: Option<Vec<String>>,
 }
