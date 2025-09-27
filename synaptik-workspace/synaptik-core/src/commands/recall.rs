@@ -133,8 +133,28 @@ impl Commands {
 
     /// Centralized batch recall (keeps order of input ids; drops misses).
     pub fn recall_many(&self, memory_ids: &[String], prefer: Prefer) -> Result<Vec<RecallResult>> {
+        // Value-aware ordering: prefer higher value states first if table exists.
+        let mut ids: Vec<(Option<f32>, &String)> = memory_ids
+            .iter()
+            .map(|id| {
+                let val = self
+                    .memory
+                    .db
+                    .prepare("SELECT value FROM \"values\" WHERE state_id=?1")
+                    .ok()
+                    .and_then(|mut st| st.query([id]).ok().and_then(|mut rows| rows.next().ok().flatten().and_then(|row| row.get::<_, f32>(0).ok())));
+                (val, id)
+            })
+            .collect();
+        ids.sort_by(|a, b| match (a.0, b.0) {
+            (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal), // desc
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+
         let mut out = Vec::with_capacity(memory_ids.len());
-        for id in memory_ids {
+        for (_, id) in ids.into_iter() {
             if let Some(hit) = self.recall_any(id, prefer)? {
                 out.push(hit);
             }
@@ -151,4 +171,3 @@ fn parse_prefer(s: Option<&str>) -> Prefer {
         _ => Prefer::Auto,
     }
 }
-

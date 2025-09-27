@@ -8,6 +8,8 @@ pub mod memory; // the ONLY SQLite writer // file-only cold store (CID <-> bytes
 pub mod streamgate;
 pub mod compactor; // summarization + safety gate + replace
 pub mod masking;   // shared normalization + masking helpers
+pub mod reward;    // reward bus / sink for online learning hooks
+pub mod learner;   // step assembler + TD micro-learner
 
 // Public API
 pub use archivist::Archivist;

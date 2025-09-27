@@ -483,7 +483,28 @@ impl Memory {
                 archived_cid: row.get::<_, Option<String>>(1)?,
             })
         })?;
-        Ok(iter.filter_map(|r| r.ok()).collect())
+        let out: Vec<MemoryCandidate> = iter.filter_map(|r| r.ok()).collect();
+
+        // Value-aware reordering: if a values table exists and has entries for these ids,
+        // prefer lower-value items for compaction (stable to preserve base ordering otherwise).
+        // Best-effort; silently ignores missing table.
+        let mut with_scores: Vec<(Option<f32>, MemoryCandidate)> = Vec::with_capacity(out.len());
+        for c in out.into_iter() {
+            let score = self
+                .db
+                .prepare("SELECT value FROM \"values\" WHERE state_id=?1")
+                .ok()
+                .and_then(|mut st| st.query([&c.id]).ok().and_then(|mut rows| rows.next().ok().flatten().and_then(|row| row.get::<_, f32>(0).ok())));
+            with_scores.push((score, c));
+        }
+        // Sort by score ascending (None last)
+        with_scores.sort_by(|a, b| match (a.0, b.0) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        Ok(with_scores.into_iter().map(|(_, c)| c).collect())
     }
 
     /// Fetch content as UTF-8 string for a given memory id.

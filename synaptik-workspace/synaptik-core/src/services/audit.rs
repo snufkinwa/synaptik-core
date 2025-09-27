@@ -12,6 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::cmp::Ordering as CmpOrdering;
 
 use crate::commands::init::ensure_initialized_once;
 use crate::config::{CoreConfig, PoliciesConfig};
@@ -166,9 +167,10 @@ pub fn record_action(agent: &str, action: &str, details: &Value, severity: &str)
 
 /// Log a proposal and the decision outcome as a single audit action.
 pub fn log_proposal(p: &Proposal, decision: &RuntimeDecision) {
+    // Borrow fields from &Proposal; don't move them out.
     let details = json!({
-        "intent": p.intent,
-        "tools_requested": p.tools_requested,
+        "intent": &p.intent,
+        "tools_requested": &p.tools_requested,
         "decision": decision,
     });
     record_action("streamruntime", "proposal", &details, "low");
@@ -177,7 +179,7 @@ pub fn log_proposal(p: &Proposal, decision: &RuntimeDecision) {
 /// Log an escalation decision.
 pub fn log_escalation(p: &Proposal, reason: &str) {
     let details = json!({
-        "intent": p.intent,
+        "intent": &p.intent,
         "reason": reason,
     });
     record_action("streamruntime", "escalate", &details, "high");
@@ -186,7 +188,7 @@ pub fn log_escalation(p: &Proposal, reason: &str) {
 /// Log a streaming violation or early stop
 pub fn log_violation(p: &Proposal, label: &str, preview: &str) {
     let details = json!({
-        "intent": p.intent,
+        "intent": &p.intent,
         "violation": label,
         "preview": redact_preview(preview),
     });
@@ -224,7 +226,14 @@ pub fn evaluate_and_audit_contract(
     let contract: MoralContract = toml::from_str(text.as_ref()).map_err(|e| e.to_string())?;
     let t0 = std::time::Instant::now();
     let result_struct = evaluate_input_against_rules(message, &contract);
-    let latency = t0.elapsed().as_secs_f64() * 1000.0;
+    // Coarse-grain latency to reduce timing side-channel resolution
+    const LATENCY_MS_QUANTUM: f64 = 10.0; // 10ms buckets
+    const LATENCY_MS_CAP: f64 = 10_000.0; // cap at 10s
+    let raw_latency = t0.elapsed().as_secs_f64() * 1000.0;
+    let mut latency = (raw_latency / LATENCY_MS_QUANTUM).round() * LATENCY_MS_QUANTUM;
+    if latency.partial_cmp(&LATENCY_MS_CAP) == Some(CmpOrdering::Greater) {
+        latency = LATENCY_MS_CAP;
+    }
 
     let result_json = serde_json::to_value(&result_struct).map_err(|e| e.to_string())?;
     let rec = ContractEvalRecord {

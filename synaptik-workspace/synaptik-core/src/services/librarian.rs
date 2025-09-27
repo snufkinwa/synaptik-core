@@ -20,12 +20,15 @@ use crate::commands::init::ensure_initialized_once;
 use contracts::api::{Purpose};
 use contracts::capsule::{SimCapsule, CapsuleMeta, CapsuleSource};
 use contracts::store::ContractsStore;
+use crate::services::reward::{RewardSqliteSink, RewardEvent, RewardSink};
 use once_cell::sync::OnceCell;
 
 #[derive(Debug)]
 pub struct Librarian {
     archivist: Option<Archivist>,
     settings: LibrarianSettings,
+    // Optional injected contracts store to reduce global coupling
+    contracts: Option<ContractsStore>,
 }
 
 impl Librarian {
@@ -33,7 +36,19 @@ impl Librarian {
         Self {
             archivist,
             settings,
+            contracts: None,
         }
+    }
+
+    /// Optional injection to avoid global coupling with the contracts store.
+    pub fn with_contracts_store(mut self, store: ContractsStore) -> Self {
+        self.contracts = Some(store);
+        self
+    }
+
+    fn contracts_store_ref(&self) -> Option<&ContractsStore> {
+        if let Some(ref s) = self.contracts { return Some(s); }
+        contracts_store()
     }
 
     /// Main ingest path: summarize (always, if long) → optional reflect → Memory write.
@@ -86,14 +101,26 @@ impl Librarian {
 
             // Lightweight reflection seed from recent summaries (optional heuristic)
             let reflection = {
-                let pool =
-                    memory.recent_summaries_by_lobe(lobe, self.settings.reflection_pool_size)?;
+                // Hard bounds to prevent large-scale processing if backend over-returns.
+                const MAX_POOL: usize = 200; // clamp pool size
+                const MAX_SUMMARY_LEN: usize = 2_000; // clamp per summary chars
+                const MAX_TOKENS_TOTAL: usize = 50_000; // clamp overall tokens processed
+
+                let requested = self.settings.reflection_pool_size.min(MAX_POOL);
+                let pool = memory.recent_summaries_by_lobe(lobe, requested)?;
                 let mut freq = std::collections::HashMap::<String, usize>::new();
-                for s in pool {
+                let mut tokens_seen = 0usize;
+                'outer: for s in pool {
+                    let s = if s.len() > MAX_SUMMARY_LEN {
+                        // Truncate on character boundary to avoid slicing in middle of UTF-8 codepoint.
+                        s.chars().take(MAX_SUMMARY_LEN).collect::<String>()
+                    } else { s };
                     for t in s.split(|c: char| !c.is_alphanumeric()) {
                         let t = t.to_lowercase();
                         if t.len() >= 3 {
                             *freq.entry(t).or_default() += 1;
+                            tokens_seen += 1;
+                            if tokens_seen >= MAX_TOKENS_TOTAL { break 'outer; }
                         }
                     }
                 }
@@ -137,7 +164,7 @@ impl Librarian {
 
         // Assemble a minimal SimCapsule and ingest asynchronously (best-effort).
         // Non-blocking: errors are swallowed after logging.
-        if let Some(store) = contracts_store() {
+        if let Some(store) = self.contracts_store_ref() {
             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
             let cap = SimCapsule {
                 inputs: serde_json::Value::Null,
@@ -159,14 +186,59 @@ impl Librarian {
                     parent_id: None,
                 },
             };
-            // Spawn a lightweight thread to avoid blocking the caller.
+            // Spawn a lightweight thread to avoid blocking the caller. Log errors.
             let store_clone = store.clone();
             let mem_id = memory_id.clone();
-            std::thread::spawn(move || {
-                if let Ok(handle) = store_clone.ingest_capsule(cap) {
-                    let _ = store_clone.map_memory(&mem_id, &handle.id);
+            let lobe_clone = lobe.to_string();
+            if let Err(e) = std::thread::Builder::new().name("capsule_ingest".into()).spawn(move || {
+                match store_clone.ingest_capsule(cap) {
+                    Ok(handle) => {
+                        if let Err(map_err) = store_clone.map_memory(&mem_id, &handle.id) {
+                            record_action(
+                                "librarian",
+                                "capsule_map_error",
+                                &json!({"memory_id": mem_id, "error": map_err.to_string()}),
+                                "medium",
+                            );
+                        }
+
+                        // Shaping reward for Real capsule ingest (small positive). Best-effort.
+                        if let Ok(sink) = RewardSqliteSink::open_default() {
+                            let ev = RewardEvent {
+                                lobe: lobe_clone.clone(),
+                                capsule_id: handle.id.clone(),
+                                parent_id: None,
+                                value: 0.05,
+                                ts_ms: now_ms as i64,
+                                labels: vec!["ingest".into()],
+                                verdict: "Real".into(),
+                                risk: 0.0,
+                            };
+                            let _ = sink.publish(&ev);
+                        }
+
+                        // Assemble a step anchored to this new state; next state inferred if any.
+                        if let Ok(asm) = crate::services::learner::StepAssembler::open_default() {
+                            let _ = asm.record_from_reward(&lobe_clone, &mem_id, &handle.id, 0.05, now_ms as i64);
+                        }
+                    }
+                    Err(err) => {
+                        record_action(
+                            "librarian",
+                            "capsule_ingest_error",
+                            &json!({"memory_id": mem_id, "error": err.to_string()}),
+                            "medium",
+                        );
+                    }
                 }
-            });
+            }) {
+                record_action(
+                    "librarian",
+                    "spawn_error",
+                    &json!({"error": e.to_string()}),
+                    "high",
+                );
+            }
         }
 
         Ok(memory_id)
@@ -198,7 +270,7 @@ impl Librarian {
     pub fn fetch(&self, memory: &Memory, memory_id: &str) -> Result<Option<Vec<u8>>> {
         if let Some(bytes) = memory.recall(memory_id)? {
             // Contracts gate: only gate when exposing to caller.
-            if let Some(store) = contracts_store() {
+            if let Some(store) = self.contracts_store_ref() {
                 if let Ok(Some(caps_id)) = store.capsule_for_memory(memory_id) {
                     if let Err(denied) = store.gate_replay(&caps_id, Purpose::Replay) {
                         record_action(
@@ -222,7 +294,7 @@ impl Librarian {
         let cold = self.fetch_cold(memory, memory_id)?;
         if cold.is_some() {
             // Gate cold recall as well
-            if let Some(store) = contracts_store() {
+            if let Some(store) = self.contracts_store_ref() {
                 if let Ok(Some(caps_id)) = store.capsule_for_memory(memory_id) {
                     if let Err(denied) = store.gate_replay(&caps_id, Purpose::Replay) {
                         record_action(

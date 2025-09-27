@@ -42,6 +42,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use crate::utils::path as pathutil;
+
 const OBJECTS_DIR: &str = "objects";
 const VERSIONS_DIR: &str = "versions";
 const LATEST_FILE: &str = "LATEST";
@@ -83,8 +85,12 @@ impl PonsStore {
     /// Open or initialize a pons store at the given root.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
+        // Ensure base exists then store canonicalized root for containment checks.
         fs::create_dir_all(root.join(OBJECTS_DIR))?;
-        Ok(Self { root })
+        let canon_root = root
+            .canonicalize()
+            .unwrap_or(root); // if canonicalize fails (unusual), keep as-is
+        Ok(Self { root: canon_root })
     }
 
     /// Ensure a given pons namespace exists (idempotent).
@@ -123,6 +129,8 @@ impl PonsStore {
         let ts_ms = Utc::now().timestamp_millis();
         let version_id = format!("{}-{}", ts_ms, &etag[..12]);
         let data_path = data_path(&versions_dir, &version_id);
+        // Guard destination path within root, then write atomically.
+        let _ = pathutil::assert_within_root_abs(&self.root, &data_path)?;
         write_atomic(&data_path, data)?;
 
         let sidecar = ObjectSidecar {
@@ -133,9 +141,11 @@ impl PonsStore {
         };
         let sidecar_path = sidecar_path(&versions_dir, &version_id);
         let sidecar_bytes = serde_json::to_vec_pretty(&sidecar)?;
+        let _ = pathutil::assert_within_root_abs(&self.root, &sidecar_path)?;
         write_atomic(&sidecar_path, &sidecar_bytes)?;
 
         let latest_path = self.key_dir(&pons, &key).join(LATEST_FILE);
+        let _ = pathutil::assert_within_root_abs(&self.root, latest_path.as_path())?;
         write_atomic(latest_path.as_path(), version_id.as_bytes())?;
 
         let object_ref = ObjectRef {
@@ -189,6 +199,8 @@ impl PonsStore {
             let _ = std::io::copy(&mut in_f, &mut out)?;
             out.sync_all()?;
         }
+        // Guard the final destination under root then rename atomically.
+        let _ = pathutil::assert_within_root_abs(&self.root, &data_path)?;
         fs::rename(&tmp, &data_path)?;
 
         // Sidecar + latest pointer
@@ -201,9 +213,11 @@ impl PonsStore {
         };
         let sidecar_path = sidecar_path(&versions_dir, &version_id);
         let sidecar_bytes = serde_json::to_vec_pretty(&sidecar)?;
+        let _ = pathutil::assert_within_root_abs(&self.root, &sidecar_path)?;
         write_atomic(&sidecar_path, &sidecar_bytes)?;
 
         let latest_path = self.key_dir(&pons, &key).join(LATEST_FILE);
+        let _ = pathutil::assert_within_root_abs(&self.root, latest_path.as_path())?;
         write_atomic(latest_path.as_path(), version_id.as_bytes())?;
 
         let object_ref = ObjectRef {
@@ -437,6 +451,7 @@ impl PonsStore {
     fn read_version_bytes(&self, pons: &str, key: &str, version_id: &str) -> Result<Vec<u8>> {
         let versions_dir = self.versions_dir(pons, key);
         let path = data_path(&versions_dir, version_id);
+        let _ = pathutil::assert_within_root_abs(&self.root, &path)?;
         Ok(fs::read(&path).with_context(|| format!("read {:?}", path))?)
     }
 

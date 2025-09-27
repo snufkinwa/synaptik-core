@@ -56,7 +56,11 @@ fn open_sqlite<P: AsRef<Path>>(p: P) -> Connection {
 #[test]
 fn commands_remember_reflect_stats() {
     // Commands resolves canonical paths internally; the db_path arg is ignored.
-    let cmds = Commands::new("ignored", None).expect("commands new");
+    // Disable runtime governance for this targeted prune test to avoid unrelated blocks.
+    let builder = Commands::builder().expect("builder");
+    let mut cfg2 = ensure_initialized_once().expect("init").config.clone();
+    cfg2.services.ethos_enabled = false;
+    let cmds = builder.with_config(cfg2).build().expect("commands new");
 
     // Act: remember (always summarizes for long text; here it's short, ok)
     let content = "User prefers concise explanations. They like short answers. This is a test.";

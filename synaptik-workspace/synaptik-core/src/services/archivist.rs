@@ -27,6 +27,9 @@ pub struct Archivist {
 }
 
 impl Archivist {
+    // Conservative per-object size cap to avoid disk exhaustion from a single write.
+    // Adjust when exposing as config. Textual memories typically fall well below this.
+    const MAX_OBJECT_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
     /// Initialize the archive root (idempotent). No DB handle.
     ///
     /// # Arguments
@@ -51,6 +54,9 @@ impl Archivist {
     /// - Writes file `<root>/<cid>` **only if missing** (idempotent).
     /// - **Does not** touch SQLite. Caller (Librarian) must update Memory.
     pub fn archive(&self, memory_id: &str, bytes: &[u8]) -> Result<String> {
+        if bytes.len() > Self::MAX_OBJECT_BYTES {
+            anyhow::bail!("archive object too large: {} bytes (max {})", bytes.len(), Self::MAX_OBJECT_BYTES);
+        }
         let cid = blake3::hash(bytes).to_hex().to_string();
 
         // Write object once (idempotent)
@@ -88,6 +94,14 @@ impl Archivist {
     /// - Audits the read (can be removed if too chatty).
     pub fn retrieve(&self, cid: &str) -> Result<Vec<u8>> {
         let path = self.root.join(cid);
+        let meta = fs::metadata(&path)?;
+        if meta.len() > Self::MAX_OBJECT_BYTES as u64 {
+            anyhow::bail!(
+                "archived object too large to retrieve safely: {} bytes (max {})",
+                meta.len(),
+                Self::MAX_OBJECT_BYTES
+            );
+        }
         let bytes = fs::read(&path)?;
 
         record_action(

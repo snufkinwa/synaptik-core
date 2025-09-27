@@ -9,6 +9,7 @@ use contracts::{EvaluationResult, MoralContract, Verdict};
 use contracts::evaluator::load_or_default;
 use contracts::{evaluate_input_against_rules};
 use crate::utils::pons::PonsStore;
+use crate::services::reward::RewardSink;
 use contracts::capsule::{SimCapsule, CapsuleMeta, CapsuleSource};
 use contracts::api::CapsAnnot;
 use contracts::store::ContractsStore;
@@ -207,11 +208,33 @@ impl<'a> Compactor<'a> {
                 };
                 let store_clone = store.clone();
                 let mem_id = c.id.clone();
+                let lobe_c = lobe.to_string();
                 let annot = CapsAnnot { verdict: verdict_variant, risk: risk_score, labels, policy_ver: "default".into(), patch_id: None, ts_ms: now_ms };
                 std::thread::spawn(move || {
                     if let Ok(handle) = store_clone.ingest_capsule(cap) {
                         let _ = store_clone.map_memory(&mem_id, &handle.id);
                         let _ = store_clone.annotate(&handle.id, &annot);
+
+                        // Publish reward event (best-effort)
+                        if let Ok(sink) = crate::services::reward::RewardSqliteSink::open_default() {
+                            let parent = store_clone.capsule_for_memory(&mem_id).ok().flatten();
+                            let ev = crate::services::reward::RewardEvent {
+                                lobe: lobe_c.clone(),
+                                capsule_id: handle.id.clone(),
+                                parent_id: parent,
+                                value: crate::services::reward::reward_from_annotation(&annot),
+                                ts_ms: annot.ts_ms as i64,
+                                labels: annot.labels.clone(),
+                                verdict: format!("{:?}", annot.verdict),
+                                risk: annot.risk,
+                            };
+                            let _ = sink.publish(&ev);
+                        }
+
+                        // Assemble step and update value: use memory_id as state, no next_state yet.
+                        if let Ok(asm) = crate::services::learner::StepAssembler::open_default() {
+                            let _ = asm.record_from_reward(&lobe_c, &mem_id, &handle.id, crate::services::reward::reward_from_annotation(&annot), annot.ts_ms as i64);
+                        }
                     }
                 });
             }

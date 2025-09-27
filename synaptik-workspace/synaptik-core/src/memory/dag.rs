@@ -21,6 +21,7 @@ use std::{
 };
 
 use crate::commands::init::ensure_initialized_once;
+use crate::utils::path as pathutil;
 
 // ---------- paths ----------
 
@@ -61,6 +62,10 @@ fn paths_ref_dir() -> Result<PathBuf> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    // Enforce that DAG writes stay within the initialized root.
+    let root = ensure_initialized_once()?.root.clone();
+    let root = root.canonicalize().unwrap_or(root);
+    let _ = pathutil::assert_within_root_abs(&root, path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create_dir_all({:?})", parent))?;
     }

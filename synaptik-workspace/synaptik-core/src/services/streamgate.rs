@@ -5,6 +5,7 @@ use serde::Serialize;
 use contracts::types::{ContractRule, MoralContract};
 use contracts::normalize::for_rules;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
@@ -295,6 +296,11 @@ pub struct StreamRuntime<C: EthosContract, M: LlmClient> {
 
 impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
     pub fn generate(&self, p: Proposal) -> std::result::Result<Finalized, GateError> {
+        // Global safeguards to prevent resource exhaustion in absence of explicit constraints
+        const DEFAULT_MAX_TOKENS: usize = 512;           // fallback token cap
+        const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64 KiB output cap
+        const DEFAULT_BUDGET_MS: u128 = 3_000;           // wall-clock budget
+
         let decision = self.contract.evaluate(&p);
         audit::log_proposal(&p, &decision);
 
@@ -316,6 +322,7 @@ impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
 
         let sys_prompt = prompt_compile(&p, constraints.as_ref());
         let mut stream = self.model.stream(sys_prompt)?;
+        let t0 = Instant::now();
 
         let mut buf = String::new();
         let mut violated: Option<String> = None;
@@ -338,7 +345,13 @@ impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
             })
             .unwrap_or(0);
 
+        let fallback_max_tokens = DEFAULT_MAX_TOKENS;
         while let Some(tok) = stream.next() {
+            // Hard stop: wall-clock budget exceeded
+            if t0.elapsed().as_millis() >= DEFAULT_BUDGET_MS {
+                break;
+            }
+
             if let Some(spec) = &constraints {
                 // Detect stop phrase across token boundaries (buf + tok)
                 if hits_stop_phrase(&buf, &tok, &spec.stop_phrases) {
@@ -370,6 +383,15 @@ impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
                 }
             } else {
                 buf.push_str(&tok);
+                // Fallback safeguards when no explicit constraints are present
+                if token_limit_reached(&buf, fallback_max_tokens) {
+                    break;
+                }
+            }
+
+            // Output size guard regardless of constraints
+            if buf.len() >= DEFAULT_MAX_OUTPUT_BYTES {
+                break;
             }
         }
 
