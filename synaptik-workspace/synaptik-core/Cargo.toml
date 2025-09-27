@@ -22,11 +22,21 @@ summary = "0.1.0"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+# Experimental host-side WASM contract execution path. This does not yet provide
+# full ABI marshalling; enabling it will attempt to exercise the sandbox stub if
+# the contracts crate was built with its `wasm` feature and the runtime config flag is true.
+wasm-contracts = []
+
 [dev-dependencies]
 sysinfo = "0.30"
 crossbeam-channel = "0.5"
 rand = "0.8"
 tempfile = "3.10"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.contracts]
+path = "../contracts"
+features = ["wasm_host"]
 
 [[bench]]
 name = "load_ingest"

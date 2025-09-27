@@ -22,6 +22,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry + git + target
         uses: actions/cache@v4
@@ -45,3 +47,7 @@ jobs:
           cd synaptik-workspace
           cargo test --workspace --all-features --locked --no-fail-fast
 
+      - name: Build contracts crate for wasm32
+        run: |
+          cd synaptik-workspace
+          cargo build -p contracts --target wasm32-unknown-unknown --locked --release

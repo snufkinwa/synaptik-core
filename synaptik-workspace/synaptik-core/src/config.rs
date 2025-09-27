@@ -290,8 +290,6 @@ pub struct ContractsConfig {
     pub allow_allow_rules: bool,
     #[serde(default)]
     pub allowed_signers: Vec<String>,
-    #[serde(default = "ContractsConfig::default_wasm_enabled")]
-    pub wasm_enabled: bool,
     #[serde(default = "ContractsConfig::default_wasm_module_path")]
     pub wasm_module_path: PathBuf,
     #[serde(default = "ContractsConfig::default_wasm_export")]
@@ -321,9 +319,6 @@ impl ContractsConfig {
     fn default_max_file_kb() -> usize {
         256
     }
-    fn default_wasm_enabled() -> bool {
-        false
-    }
     fn default_wasm_module_path() -> PathBuf {
         PathBuf::from("contracts/contract_eval.wasm")
     }
@@ -344,7 +339,6 @@ impl Default for ContractsConfig {
             max_file_kb: Self::default_max_file_kb(),
             allow_allow_rules: true,
             allowed_signers: vec![],
-            wasm_enabled: Self::default_wasm_enabled(),
             wasm_module_path: Self::default_wasm_module_path(),
             wasm_export: Self::default_wasm_export(),
         }

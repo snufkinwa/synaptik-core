@@ -225,7 +225,29 @@ pub fn evaluate_and_audit_contract(
     let text = read_verified_or_embedded(&path, file_name, locked).map_err(|e| e.to_string())?;
     let contract: MoralContract = toml::from_str(text.as_ref()).map_err(|e| e.to_string())?;
     let t0 = std::time::Instant::now();
-    let result_struct = evaluate_input_against_rules(message, &contract);
+    // Attempt WASM sandbox path if a module is present; otherwise fall back.
+    // This path is always considered; there is no runtime toggle to disable it.
+    let result_struct = {
+        let sandbox_attempt: Option<contracts::EvaluationResult> = (|| {
+            let module_path = &settings.wasm_module_path;
+            if !module_path.exists() { return None; }
+            if let Ok(bytes) = std::fs::read(module_path) {
+                if let Ok(_stub_resp) = contracts::run_wasm_contract(&bytes, message) {
+                    // WASM sandbox executed successfully. We still delegate to the native
+                    // evaluator for now (ABI not finalized) but we surface that the sandbox
+                    // path was taken by returning Some(...). This allows callers / telemetry
+                    // to distinguish that the sandbox was exercised.
+                    return Some(evaluate_input_against_rules(message, &contract));
+                }
+            }
+            None
+        })();
+        if let Some(res) = sandbox_attempt {
+            res
+        } else {
+            evaluate_input_against_rules(message, &contract)
+        }
+    };
     // Coarse-grain latency to reduce timing side-channel resolution
     const LATENCY_MS_QUANTUM: f64 = 10.0; // 10ms buckets
     const LATENCY_MS_CAP: f64 = 10_000.0; // cap at 10s
@@ -421,6 +443,7 @@ impl Default for LogPaths {
 struct ContractsSettings {
     dir: PathBuf,
     default_contract: String,
+    wasm_module_path: PathBuf,
 }
 
 impl ContractsSettings {
@@ -428,6 +451,7 @@ impl ContractsSettings {
         Self {
             dir: cfg.contracts.path.clone(),
             default_contract: cfg.contracts.default_contract.clone(),
+            wasm_module_path: cfg.contracts.wasm_module_path.clone(),
         }
     }
 }

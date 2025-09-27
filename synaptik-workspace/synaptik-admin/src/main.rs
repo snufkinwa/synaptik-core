@@ -99,7 +99,7 @@ fn registry_init(
         .append(true)
         .open(&reg)
         .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{ev}\n").as_bytes()))
-        .with_context(|| format!("append registry event to {:?}", reg))?;
+        .with_context(|| format!("append registry event to {reg:?}"))?;
     println!("initialized registry at {}", reg.display());
     Ok(())
 }

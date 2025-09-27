@@ -10,11 +10,25 @@ include = ["src/**", "assets/**", "Cargo.toml"]
 crate-type = ["rlib", "cdylib"]
 
 [features]
-# wasm feature enables wasm-bindgen plus JS getrandom support for rand
-wasm = ["wasm-bindgen", "getrandom/js"]
+# Default enables only the guest-facing bits so `--target wasm32-unknown-unknown`
+# builds work out of the box without extra flags. The host sandbox can be opted-in.
+# - wasm_guest: bindings and JS RNG for wasm32 target artifacts
+# - wasm_host:  wasmtime-based native sandbox for executing guest modules
+# - wasm:       alias for guest only (kept for compatibility)
+# - full:       host + guest convenience alias (use on native targets)
+default    = ["wasm_guest"]
+wasm       = ["wasm_guest"]
+full       = ["wasm_guest", "wasm_host"]
+wasm_guest = ["wasm-bindgen", "getrandom/js"]
+wasm_host  = ["wasmtime"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.wasmtime]
+version = "14"
+optional = true
+default-features = false
+features = ["cranelift"]
 
 [dependencies]
-wasm-bindgen = { version = "0.2", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
@@ -25,3 +39,8 @@ blake3 = "1"
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 getrandom = { version = "0.2", optional = true }
 thiserror = "1.0"
+
+# Only pull wasm-bindgen when compiling for wasm32 targets.
+[target.'cfg(target_arch = "wasm32")'.dependencies.wasm-bindgen]
+version = "0.2"
+optional = true

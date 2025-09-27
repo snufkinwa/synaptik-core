@@ -3,7 +3,9 @@ use crate::types::{ContractRule, MoralContract};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
-use std::{collections::HashSet, fs, thread, time::Duration};
+use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{fs, thread, time::Duration};
 use toml;
 
 // ----------------- Result -----------------
@@ -24,8 +26,10 @@ pub struct EvaluationResult {
 // ----------------- I/O -----------------
 
 /// Result type for contract loading.
+#[cfg(not(target_arch = "wasm32"))]
 pub type LoadResult<T> = std::result::Result<T, LoadError>;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error("io: {0}")]
@@ -37,10 +41,12 @@ pub enum LoadError {
 }
 
 /// Exponential backoff schedule (ms) with jitter 0..=10 ms added each attempt.
+#[cfg(not(target_arch = "wasm32"))]
 const BACKOFF_SERIES: [u64; 5] = [25, 50, 100, 200, 400];
 
 /// Attempt to load and parse a contract with resilience and without panicking.
 /// Returns a MoralContract on success or a LoadError. Caller may decide to fallback.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_contract_from_file(path: &str) -> LoadResult<MoralContract> {
     let mut rng = StdRng::from_entropy();
     let mut last_content = String::new();
@@ -78,6 +84,7 @@ pub fn load_contract_from_file(path: &str) -> LoadResult<MoralContract> {
 }
 
 /// Fallback helper: attempt load, else synthesize a minimal inert contract so callers can proceed.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_or_default(path: &str) -> MoralContract {
     match load_contract_from_file(path) {
         Ok(c) => c,
