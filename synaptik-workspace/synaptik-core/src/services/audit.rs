@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::commands::init::ensure_initialized_once;
 use crate::config::{CoreConfig, PoliciesConfig};
 use crate::services::ethos::{Proposal, RuntimeDecision};
-use contracts::assets::{read_verified_or_embedded, write_default_contracts};
+use contracts::assets::{default_contract_text, read_verified_or_embedded, write_default_contracts};
 use contracts::{MoralContract, evaluate_input_against_rules};
 // ----------- Logbook paths -----------
 
@@ -222,8 +222,102 @@ pub fn evaluate_and_audit_contract(
     let path = settings.dir.join(&settings.default_contract);
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let locked = CONTRACTS_LOCKED.load(Ordering::SeqCst);
-    let text = read_verified_or_embedded(&path, file_name, locked).map_err(|e| e.to_string())?;
-    let contract: MoralContract = toml::from_str(text.as_ref()).map_err(|e| e.to_string())?;
+
+    // Cheap integrity check: prefer agent-stamped manifest when present; optional enforcement
+    let text_str: String = {
+        let receipt_path = settings.dir.join(".bind-receipt.json");
+        let mut use_embedded_fallback = false;
+        let mut fallback_reason: Option<String> = None;
+        let mut candidate_text: Option<String> = None;
+
+        if receipt_path.exists() {
+            match std::fs::read(&receipt_path) {
+                Err(_) => {
+                    use_embedded_fallback = true;
+                    fallback_reason = Some("receipt_unreadable".into());
+                }
+                Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Err(_) => {
+                        use_embedded_fallback = true;
+                        fallback_reason = Some("receipt_unparseable".into());
+                    }
+                    Ok(v) => {
+                        let merged_hash = v
+                            .get("merged_hash")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
+                        let verified = v
+                            .get("verified")
+                            .and_then(|x| x.as_bool())
+                            .unwrap_or(false);
+                        // When enforcement is enabled, require verified=true from agent
+                        if settings.require_signed_manifest() && !verified {
+                            use_embedded_fallback = true;
+                            fallback_reason = Some("receipt_not_verified".into());
+                        } else {
+                            // Hash check against on-disk content
+                            match std::fs::read_to_string(&path) {
+                                Ok(s) => {
+                                    let h = blake3::hash(s.as_bytes()).to_hex().to_string();
+                                    if !merged_hash.is_empty() && h == merged_hash {
+                                        candidate_text = Some(s);
+                                    } else {
+                                        use_embedded_fallback = true;
+                                        fallback_reason = Some("receipt_hash_mismatch".into());
+                                    }
+                                }
+                                Err(_) => {
+                                    use_embedded_fallback = true;
+                                    fallback_reason = Some("active_toml_unreadable".into());
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        } else {
+            // No receipt present: if enforcement is enabled, fall back; else read normally
+            if settings.require_signed_manifest() {
+                use_embedded_fallback = true;
+                fallback_reason = Some("receipt_missing".into());
+            }
+        }
+
+        // Decide final text source
+        if use_embedded_fallback {
+            if let Some(reason) = fallback_reason {
+                record_action(
+                    "audit",
+                    "contracts_receipt_fallback",
+                    &json!({
+                        "reason": reason,
+                        "file": path.to_string_lossy(),
+                        "receipt": receipt_path.to_string_lossy(),
+                    }),
+                    "medium",
+                );
+            }
+            if let Some(embed) = default_contract_text(file_name) {
+                embed.to_string()
+            } else {
+                // No embedded baseline: fall back to verified-or-embedded reader
+                read_verified_or_embedded(&path, file_name, locked)
+                    .map_err(|e| e.to_string())?
+                    .into_owned()
+            }
+        } else if let Some(s) = candidate_text {
+            // Verified by receipt
+            s
+        } else {
+            // Read normally
+            read_verified_or_embedded(&path, file_name, locked)
+                .map_err(|e| e.to_string())?
+                .into_owned()
+        }
+    };
+
+    let contract: MoralContract = toml::from_str(&text_str).map_err(|e| e.to_string())?;
     let t0 = std::time::Instant::now();
     // Attempt WASM sandbox path if a module is present; otherwise fall back.
     // This path is always considered; there is no runtime toggle to disable it.
@@ -444,6 +538,7 @@ struct ContractsSettings {
     dir: PathBuf,
     default_contract: String,
     wasm_module_path: PathBuf,
+    require_signed_manifest: bool,
 }
 
 impl ContractsSettings {
@@ -452,6 +547,7 @@ impl ContractsSettings {
             dir: cfg.contracts.path.clone(),
             default_contract: cfg.contracts.default_contract.clone(),
             wasm_module_path: cfg.contracts.wasm_module_path.clone(),
+            require_signed_manifest: cfg.contracts.require_signed_manifest,
         }
     }
 }
@@ -460,5 +556,11 @@ impl Default for ContractsSettings {
     fn default() -> Self {
         let cfg = CoreConfig::default();
         Self::from_config(&cfg)
+    }
+}
+
+impl ContractsSettings {
+    fn require_signed_manifest(&self) -> bool {
+        self.require_signed_manifest
     }
 }

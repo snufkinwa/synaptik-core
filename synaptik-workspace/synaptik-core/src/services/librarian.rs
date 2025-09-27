@@ -10,48 +10,26 @@ use std::num::NonZeroU32;
 
 use summary::{Language, Summarizer};
 
-use crate::commands::init::ensure_initialized_once;
 use crate::config::PoliciesConfig;
 use crate::services::archivist::Archivist;
 use crate::services::audit::record_action;
 use crate::services::memory::Memory;
 
-// Contracts integration (SimCapsules)
-use crate::services::reward::{RewardEvent, RewardSink, RewardSqliteSink};
-use contracts::api::Purpose;
-use contracts::capsule::{CapsuleMeta, CapsuleSource, SimCapsule};
-use contracts::store::ContractsStore;
-use once_cell::sync::OnceCell;
+// SimCapsules removed: no contracts store integration in Phase I.
 
 #[derive(Debug)]
 pub struct Librarian {
     archivist: Option<Archivist>,
     settings: LibrarianSettings,
-    // Optional injected contracts store to reduce global coupling
-    contracts: Option<ContractsStore>,
+    // SimCapsules removed: no contracts store integration in Phase I.
 }
 
 impl Librarian {
     pub fn new(archivist: Option<Archivist>, settings: LibrarianSettings) -> Self {
-        Self {
-            archivist,
-            settings,
-            contracts: None,
-        }
+        Self { archivist, settings }
     }
 
-    /// Optional injection to avoid global coupling with the contracts store.
-    pub fn with_contracts_store(mut self, store: ContractsStore) -> Self {
-        self.contracts = Some(store);
-        self
-    }
-
-    fn contracts_store_ref(&self) -> Option<&ContractsStore> {
-        if let Some(ref s) = self.contracts {
-            return Some(s);
-        }
-        contracts_store()
-    }
+    // SimCapsules removed: contracts store helpers removed.
 
     /// Main ingest path: summarize (always, if long) → optional reflect → Memory write.
     /// Returns the `memory_id`.
@@ -168,94 +146,7 @@ impl Librarian {
             "low",
         );
 
-        // Assemble a minimal SimCapsule and ingest asynchronously (best-effort).
-        // Non-blocking: errors are swallowed after logging.
-        if let Some(store) = self.contracts_store_ref() {
-            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-            let cap = SimCapsule {
-                inputs: serde_json::Value::Null,
-                context: serde_json::json!({ "lobe": lobe, "key": key }),
-                actions: serde_json::json!(["ingest_text"]),
-                outputs: serde_json::json!({ "text": content }),
-                trace: serde_json::json!({ "summary_len": summary.len(), "reflected": reflection.is_some() }),
-                artifacts: vec![],
-                meta: CapsuleMeta {
-                    capsule_id: None,
-                    agent_id: Some("core".to_string()),
-                    lobe: Some(lobe.to_string()),
-                    t_start_ms: now_ms,
-                    t_end_ms: now_ms,
-                    source: CapsuleSource::Real,
-                    schema_ver: "1.0".to_string(),
-                    capsule_hash: None,
-                    issuer_signature: None,
-                    parent_id: None,
-                },
-            };
-            // Spawn a lightweight thread to avoid blocking the caller. Log errors.
-            let store_clone = store.clone();
-            let mem_id = memory_id.clone();
-            let lobe_clone = lobe.to_string();
-            if let Err(e) = std::thread::Builder::new()
-                .name("capsule_ingest".into())
-                .spawn(move || {
-                    match store_clone.ingest_capsule(cap) {
-                        Ok(handle) => {
-                            if let Err(map_err) = store_clone.map_memory(&mem_id, &handle.id) {
-                                record_action(
-                                    "librarian",
-                                    "capsule_map_error",
-                                    &json!({"memory_id": mem_id, "error": map_err.to_string()}),
-                                    "medium",
-                                );
-                            }
-
-                            // Shaping reward for Real capsule ingest (small positive). Best-effort.
-                            if let Ok(sink) = RewardSqliteSink::open_default() {
-                                let ev = RewardEvent {
-                                    lobe: lobe_clone.clone(),
-                                    capsule_id: handle.id.clone(),
-                                    parent_id: None,
-                                    value: 0.05,
-                                    ts_ms: now_ms as i64,
-                                    labels: vec!["ingest".into()],
-                                    verdict: "Real".into(),
-                                    risk: 0.0,
-                                };
-                                let _ = sink.publish(&ev);
-                            }
-
-                            // Assemble a step anchored to this new state; next state inferred if any.
-                            if let Ok(asm) = crate::services::learner::StepAssembler::open_default()
-                            {
-                                let _ = asm.record_from_reward(
-                                    &lobe_clone,
-                                    &mem_id,
-                                    &handle.id,
-                                    0.05,
-                                    now_ms as i64,
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            record_action(
-                                "librarian",
-                                "capsule_ingest_error",
-                                &json!({"memory_id": mem_id, "error": err.to_string()}),
-                                "medium",
-                            );
-                        }
-                    }
-                })
-            {
-                record_action(
-                    "librarian",
-                    "spawn_error",
-                    &json!({"error": e.to_string()}),
-                    "high",
-                );
-            }
-        }
+        // SimCapsules removed: no capsule ingest sidecar.
 
         Ok(memory_id)
     }
@@ -285,20 +176,6 @@ impl Librarian {
     // Fetch with hot->cold path (kept for general callers).
     pub fn fetch(&self, memory: &Memory, memory_id: &str) -> Result<Option<Vec<u8>>> {
         if let Some(bytes) = memory.recall(memory_id)? {
-            // Contracts gate: only gate when exposing to caller.
-            if let Some(store) = self.contracts_store_ref() {
-                if let Ok(Some(caps_id)) = store.capsule_for_memory(memory_id) {
-                    if let Err(denied) = store.gate_replay(&caps_id, Purpose::Replay) {
-                        record_action(
-                            "librarian",
-                            "gate_denied",
-                            &json!({"memory_id": memory_id, "capsule_id": caps_id, "reason": denied.reason }),
-                            "high",
-                        );
-                        return Ok(None);
-                    }
-                }
-            }
             crate::services::audit::record_action(
                 "librarian",
                 "memory_accessed_hot",
@@ -308,22 +185,7 @@ impl Librarian {
             return Ok(Some(bytes));
         }
         let cold = self.fetch_cold(memory, memory_id)?;
-        if cold.is_some() {
-            // Gate cold recall as well
-            if let Some(store) = self.contracts_store_ref() {
-                if let Ok(Some(caps_id)) = store.capsule_for_memory(memory_id) {
-                    if let Err(denied) = store.gate_replay(&caps_id, Purpose::Replay) {
-                        record_action(
-                            "librarian",
-                            "gate_denied",
-                            &json!({"memory_id": memory_id, "capsule_id": caps_id, "reason": denied.reason }),
-                            "high",
-                        );
-                        return Ok(None);
-                    }
-                }
-            }
-        }
+        // SimCapsules removed: no gate on cold recall either.
         Ok(cold)
     }
 
@@ -373,21 +235,7 @@ impl Librarian {
     }
 }
 
-// -------------------- Contracts Store helper --------------------
-
-fn contracts_store() -> Option<&'static ContractsStore> {
-    static CELL: OnceCell<Option<ContractsStore>> = OnceCell::new();
-    CELL.get_or_init(|| {
-        let root = ensure_initialized_once()
-            .map(|r| r.config.contracts.path.join("caps_store"))
-            .ok();
-        match root {
-            Some(dir) => ContractsStore::new(dir).ok(),
-            None => None,
-        }
-    })
-    .as_ref()
-}
+// SimCapsules removed: no contracts store helper.
 
 #[derive(Debug, Clone)]
 pub struct LibrarianSettings {

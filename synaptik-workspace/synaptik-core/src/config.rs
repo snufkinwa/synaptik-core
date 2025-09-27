@@ -280,6 +280,8 @@ pub struct ContractsConfig {
     pub accept_custom: bool,
     #[serde(default = "ContractsConfig::default_require_signature")]
     pub require_signature: bool,
+    #[serde(default = "ContractsConfig::default_require_signed_manifest")]
+    pub require_signed_manifest: bool,
     #[serde(default = "ContractsConfig::default_max_rules")]
     pub max_rules: usize,
     #[serde(default = "ContractsConfig::default_max_pattern_len")]
@@ -310,6 +312,9 @@ impl ContractsConfig {
     fn default_require_signature() -> bool {
         false
     }
+    fn default_require_signed_manifest() -> bool {
+        false
+    }
     fn default_max_rules() -> usize {
         500
     }
@@ -334,6 +339,7 @@ impl Default for ContractsConfig {
             default_contract: Self::default_contract(),
             accept_custom: Self::default_accept_custom(),
             require_signature: Self::default_require_signature(),
+            require_signed_manifest: Self::default_require_signed_manifest(),
             max_rules: Self::default_max_rules(),
             max_pattern_len: Self::default_max_pattern_len(),
             max_file_kb: Self::default_max_file_kb(),

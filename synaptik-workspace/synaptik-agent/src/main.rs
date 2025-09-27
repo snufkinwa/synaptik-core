@@ -518,8 +518,8 @@ fn process_root(
         e
     })?;
 
-    // Write receipt
-    let mhash = blake3::hash(merged.as_bytes()).to_hex().to_string();
+    // Write receipt (hash over the exact binding text we previewed/applied)
+    let mhash = blake3::hash(merged_raw.as_bytes()).to_hex().to_string();
     let receipt = serde_json::json!({
         "version": pack.version,
         "target": format!("contracts/{}", default_name),
@@ -527,6 +527,7 @@ fn process_root(
         "ts": Utc::now().to_rfc3339(),
         "actor": whoami::fallible::hostname().unwrap_or_else(|_| "agent".into()),
         "merged_hash": mhash,
+        "verified": pack.signature.as_ref().map(|_| true).unwrap_or(false),
     });
     let rec_path = root.join("contracts/.bind-receipt.json");
     if let Some(parent) = rec_path.parent() {

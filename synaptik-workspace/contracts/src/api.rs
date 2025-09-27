@@ -1,4 +1,3 @@
-use crate::capsule::SimCapsule;
 use serde::{Deserialize, Serialize};
 
 pub type CapsId = String;
@@ -29,11 +28,7 @@ pub struct CapsAnnot {
 }
 
 /// Lightweight contract trait for evaluating a capsule.
-pub trait Contract {
-    fn name(&self) -> &'static str;
-    fn version(&self) -> &'static str;
-    fn evaluate(&self, cap: &SimCapsule) -> CapsAnnot;
-}
+// Contract trait removed in Phase I simplification (SimCapsules eliminated).
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

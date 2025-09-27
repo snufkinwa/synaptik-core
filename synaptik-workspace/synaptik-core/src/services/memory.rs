@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use blake3;
 use chrono::Utc;
 use rusqlite::Connection;
-use serde_json::{Value, json};
+use serde_json::{json};
 use std::path::Path;
 use std::time::Duration;
 
@@ -20,8 +20,7 @@ use crate::memory::dag;
 use crate::services::audit;
 use crate::services::ethos::{Proposal, RuntimeDecision};
 use crate::services::streamgate::Finalized;
-use contracts::store::ContractsStore;
-use once_cell::sync::OnceCell;
+// OnceCell no longer used here after removing SimCapsules integration.
 
 /// Memory is the single authority for writing to SQLite.
 /// Expose `db` as `pub(crate)` if other services need read-only helpers internally.
@@ -327,7 +326,7 @@ impl Memory {
         let parents = parent_cid.into_iter().collect::<Vec<_>>();
 
         // Small, stable metadata for the DAG
-        let mut meta = json!({
+        let meta = json!({
             "cid": cid,
             "lobe": lobe,
             "key": key,
@@ -336,14 +335,7 @@ impl Memory {
             "updated_at": updated_at,
         });
 
-        // If a capsule mapping exists for this memory row, include it in the DAG meta for provenance.
-        if let Some(store) = contracts_store() {
-            if let Ok(Some(caps_id)) = store.capsule_for_memory(memory_id) {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert("capsule_id".to_string(), Value::String(caps_id));
-                }
-            }
-        }
+        // SimCapsules removed: no capsule_id mapping in DAG meta for Phase I.
 
         // Best-effort DAG write — never break memory hot path
         let _ = dag::save_node(
@@ -638,25 +630,7 @@ impl Memory {
 
 // -------------------- Contracts Store helper --------------------
 
-fn contracts_store() -> Option<&'static ContractsStore> {
-    // Cache only successful initialization; failed attempts do NOT poison the cell, allowing retries.
-    static CELL: OnceCell<ContractsStore> = OnceCell::new();
-    if let Some(store) = CELL.get() {
-        return Some(store);
-    }
-    let root_dir = match crate::commands::init::ensure_initialized_once() {
-        Ok(r) => r.config.contracts.path.join("caps_store"),
-        Err(_) => return None,
-    };
-    match ContractsStore::new(root_dir) {
-        Ok(store) => {
-            // Ignore set errors (race) and return the instance.
-            let _ = CELL.set(store);
-            CELL.get()
-        }
-        Err(_) => None,
-    }
-}
+// SimCapsules removed: no contracts_store integration in Memory for Phase I.
 
 // -------------------------------------------------------------------------
 // Replay helpers (thin wrappers over DAG)
