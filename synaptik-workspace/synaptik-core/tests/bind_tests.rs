@@ -7,7 +7,10 @@ use synaptik_core::commands::ensure_initialized_once;
 #[test]
 fn bind_creates_two_parent_node_and_updates_head() -> anyhow::Result<()> {
     // Use unique path names to avoid cross-test interference
-    let ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let main_path = format!("main_bind_{}", ns);
     let feat_path = format!("feat_bind_{}", ns);
 
@@ -59,4 +62,3 @@ fn bind_creates_two_parent_node_and_updates_head() -> anyhow::Result<()> {
 
     Ok(())
 }
-

@@ -148,7 +148,11 @@ fn ensure_file(
     Ok(())
 }
 
-fn ensure_root_uuid(base: &Path, created: &mut Vec<String>, existed: &mut Vec<String>) -> Result<()> {
+fn ensure_root_uuid(
+    base: &Path,
+    created: &mut Vec<String>,
+    existed: &mut Vec<String>,
+) -> Result<()> {
     let rel = "uuid";
     let p = base.join(rel);
     if p.exists() {

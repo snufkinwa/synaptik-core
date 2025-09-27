@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, Sender};
-use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
+use crossbeam_channel::{Receiver, Sender, bounded};
+use rand::{Rng, SeedableRng, distributions::Alphanumeric, rngs::StdRng};
 use sysinfo::System;
 
-use synaptik_core::commands::init::{ensure_initialized_once};
+use synaptik_core::commands::init::ensure_initialized_once;
 use synaptik_core::services::memory::Memory;
 
 #[derive(Clone, Debug)]
@@ -50,7 +50,9 @@ impl Default for Metrics {
 }
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() { return 0.0; }
+    if sorted.is_empty() {
+        return 0.0;
+    }
     let rank = (p * (sorted.len() as f64 - 1.0)).clamp(0.0, sorted.len() as f64 - 1.0);
     let idx = rank.round() as usize;
     sorted[idx]
@@ -95,9 +97,20 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
     // Single-writer queue, to respect Memory's one-writer design
     #[derive(Debug, Clone)]
     enum Op {
-        Remember { id: String, key: String, data: Vec<u8>, ack: Sender<()> },
-        Promote { id: String, ack: Sender<()> },
-        Replay { hash: String, ack: Sender<()> },
+        Remember {
+            id: String,
+            key: String,
+            data: Vec<u8>,
+            ack: Sender<()>,
+        },
+        Promote {
+            id: String,
+            ack: Sender<()>,
+        },
+        Replay {
+            hash: String,
+            ack: Sender<()>,
+        },
         Stop,
     }
 
@@ -152,7 +165,15 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
 
                 let t0 = Instant::now();
                 let (ack_r_tx, ack_r_rx) = bounded::<()>(0);
-                if txc.send(Op::Remember { id: id.clone(), key, data: content, ack: ack_r_tx }).is_err() {
+                if txc
+                    .send(Op::Remember {
+                        id: id.clone(),
+                        key,
+                        data: content,
+                        ack: ack_r_tx,
+                    })
+                    .is_err()
+                {
                     errors += 1;
                     continue;
                 }
@@ -160,7 +181,16 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
 
                 // promote (commit) to DAG; wait for completion
                 let (ack_p_tx, ack_p_rx) = bounded::<()>(0);
-                if txc.send(Op::Promote { id: id.clone(), ack: ack_p_tx }).is_err() { errors += 1; continue; }
+                if txc
+                    .send(Op::Promote {
+                        id: id.clone(),
+                        ack: ack_p_tx,
+                    })
+                    .is_err()
+                {
+                    errors += 1;
+                    continue;
+                }
                 let _ = ack_p_rx.recv();
                 let t1 = Instant::now();
                 commit_lat.push((t1 - t0).as_secs_f64() * 1000.0);
@@ -169,12 +199,20 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
                 // Replay: recall by content hash we just wrote
                 let t2 = Instant::now();
                 let (ack_x_tx, ack_x_rx) = bounded::<()>(0);
-                if txc.send(Op::Replay { hash: content_hash.clone(), ack: ack_x_tx }).is_err() { errors += 1; continue; }
+                if txc
+                    .send(Op::Replay {
+                        hash: content_hash.clone(),
+                        ack: ack_x_tx,
+                    })
+                    .is_err()
+                {
+                    errors += 1;
+                    continue;
+                }
                 let _ = ack_x_rx.recv();
                 let t3 = Instant::now();
                 replay_lat.push((t3 - t2).as_secs_f64() * 1000.0);
                 replays += 1;
-
             }
 
             let mut m = mref.lock().unwrap();
@@ -196,16 +234,24 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
         let mut cpu_count = 0usize;
         while sampler_flag.load(std::sync::atomic::Ordering::Relaxed) {
             let (rss, cpu) = sample_process_metrics(&mut sys);
-            if rss > max_rss { max_rss = rss; }
+            if rss > max_rss {
+                max_rss = rss;
+            }
             cpu_sum += cpu;
             cpu_count += 1;
             thread::sleep(Duration::from_millis(50));
         }
-        let avg_cpu = if cpu_count == 0 { 0.0 } else { cpu_sum / cpu_count as f64 };
+        let avg_cpu = if cpu_count == 0 {
+            0.0
+        } else {
+            cpu_sum / cpu_count as f64
+        };
         (max_rss, avg_cpu)
     });
 
-    for h in workers { let _ = h.join(); }
+    for h in workers {
+        let _ = h.join();
+    }
 
     // Stop writer
     let _ = tx.send(Op::Stop);
@@ -228,16 +274,26 @@ fn run_bench(cfg: BenchCfg) -> anyhow::Result<Metrics> {
     result.sqlite_size_mb = (sqlite_size_mb - base_sqlite_size_mb).max(0.0);
 
     // Sort latencies once for percentile calculation
-    result.commit_latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    result.replay_latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    result
+        .commit_latencies_ms
+        .sort_by(|a, b| a.partial_cmp(b).unwrap());
+    result
+        .replay_latencies_ms
+        .sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     Ok(result)
 }
 
 fn main() -> anyhow::Result<()> {
     // Load N and M overrides from env
-    let n: usize = std::env::var("SYN_BENCH_N").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
-    let m: usize = std::env::var("SYN_BENCH_M").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let n: usize = std::env::var("SYN_BENCH_N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000);
+    let m: usize = std::env::var("SYN_BENCH_M")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4);
     let cfg = BenchCfg {
         interactions_per_session: n,
         parallel_sessions: m,
@@ -251,7 +307,11 @@ fn main() -> anyhow::Result<()> {
     // Compute throughput and latency percentiles
     let dur_s = (metrics.end - metrics.start).as_secs_f64();
     let total_interactions = metrics.writes as f64; // per interaction we counted one write
-    let throughput = if dur_s > 0.0 { total_interactions / dur_s } else { 0.0 };
+    let throughput = if dur_s > 0.0 {
+        total_interactions / dur_s
+    } else {
+        0.0
+    };
 
     let p50c = pct(&metrics.commit_latencies_ms, 0.50);
     let p95c = pct(&metrics.commit_latencies_ms, 0.95);
@@ -261,7 +321,11 @@ fn main() -> anyhow::Result<()> {
     let p99r = pct(&metrics.replay_latencies_ms, 0.99);
 
     let total_ops = (metrics.writes + metrics.replays) as f64;
-    let error_rate = if total_ops > 0.0 { metrics.errors as f64 / total_ops * 100.0 } else { 0.0 };
+    let error_rate = if total_ops > 0.0 {
+        metrics.errors as f64 / total_ops * 100.0
+    } else {
+        0.0
+    };
 
     // Targets
     let target_tput = 5000.0 / 60.0; // 5k/min => per second
@@ -270,18 +334,36 @@ fn main() -> anyhow::Result<()> {
     let target_error_pct = 0.1;
 
     println!("--- Synaptik Core Load Bench: Ingest + Commit + Replay ---");
-    println!("Throughput: {:.1} interactions/sec (target {:.1})", throughput, target_tput);
-    println!("Latency commit ms: p50 {:.1} p95 {:.1} p99 {:.1} (target p95 < {:.0})", p50c, p95c, p99c, target_p95_commit);
-    println!("Latency replay ms: p50 {:.1} p95 {:.1} p99 {:.1} (target p95 < {:.0})", p50r, p95r, p99r, target_p95_replay);
-    println!("Resource: max RSS {:.1} MB, avg CPU {:.1}%, SQLite size +{:.1} MB", metrics.max_rss_mb, metrics.avg_cpu_percent, metrics.sqlite_size_mb);
-    println!("Errors: {} ({:.3}%) (target < {:.3}%)", metrics.errors, error_rate, target_error_pct);
+    println!(
+        "Throughput: {:.1} interactions/sec (target {:.1})",
+        throughput, target_tput
+    );
+    println!(
+        "Latency commit ms: p50 {:.1} p95 {:.1} p99 {:.1} (target p95 < {:.0})",
+        p50c, p95c, p99c, target_p95_commit
+    );
+    println!(
+        "Latency replay ms: p50 {:.1} p95 {:.1} p99 {:.1} (target p95 < {:.0})",
+        p50r, p95r, p99r, target_p95_replay
+    );
+    println!(
+        "Resource: max RSS {:.1} MB, avg CPU {:.1}%, SQLite size +{:.1} MB",
+        metrics.max_rss_mb, metrics.avg_cpu_percent, metrics.sqlite_size_mb
+    );
+    println!(
+        "Errors: {} ({:.3}%) (target < {:.3}%)",
+        metrics.errors, error_rate, target_error_pct
+    );
 
     // Simple SLO verdicts
     let ok_tput = throughput >= target_tput;
     let ok_commit = p95c < target_p95_commit;
     let ok_replay = p95r < target_p95_replay;
     let ok_err = error_rate < target_error_pct;
-    println!("SLOs: throughput={} commit={} replay={} errors={}", ok_tput, ok_commit, ok_replay, ok_err);
+    println!(
+        "SLOs: throughput={} commit={} replay={} errors={}",
+        ok_tput, ok_commit, ok_replay, ok_err
+    );
 
     Ok(())
 }

@@ -6,21 +6,19 @@ use std::path::PathBuf;
 
 use crate::config::CoreConfig;
 use crate::services::archivist::Archivist;
-use crate::services::audit::{lock_contracts, record_action, unlock_contracts};
-use crate::services::ethos::{Decision, decision_gate, precheck};
-use crate::services::{
-    FinalizedStatus, LlmClient, StreamRuntime,
-};
-use crate::services::ethos::{ContractsDecider, Proposal};
 use crate::services::audit as audit_svc;
+use crate::services::audit::{lock_contracts, record_action, unlock_contracts};
+use crate::services::ethos::{ContractsDecider, Proposal};
+use crate::services::ethos::{Decision, decision_gate, precheck};
 use crate::services::librarian::{Librarian, LibrarianSettings};
 use crate::services::memory::Memory;
+use crate::services::{FinalizedStatus, LlmClient, StreamRuntime};
 use crate::utils::pons::PonsStore;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 
-use crate::commands::init::ensure_initialized_once;
 use crate::commands as cmd;
+use crate::commands::init::ensure_initialized_once;
 
 pub struct Commands {
     pub(crate) memory: Memory,       // one SQLite connection here
@@ -132,18 +130,34 @@ impl Commands {
     /// Run content through the contract-enforced runtime. Returns sanitized text on success,
     /// or Ok(None) if the runtime stopped/escalated/violated (barrier applied).
     pub(crate) fn govern_text(&self, intent: &str, input: &str) -> Result<Option<String>> {
-        struct EchoStream { yielded: bool, text: String }
+        struct EchoStream {
+            yielded: bool,
+            text: String,
+        }
         impl Iterator for EchoStream {
             type Item = String;
             fn next(&mut self) -> Option<Self::Item> {
-                if self.yielded { None } else { self.yielded = true; Some(self.text.clone()) }
+                if self.yielded {
+                    None
+                } else {
+                    self.yielded = true;
+                    Some(self.text.clone())
+                }
             }
         }
-        struct TextEchoModel { text: String }
+        struct TextEchoModel {
+            text: String,
+        }
         impl LlmClient for TextEchoModel {
             type Stream = EchoStream;
-            fn stream(&self, _system_prompt: String) -> std::result::Result<Self::Stream, crate::services::GateError> {
-                Ok(EchoStream { yielded: false, text: self.text.clone() })
+            fn stream(
+                &self,
+                _system_prompt: String,
+            ) -> std::result::Result<Self::Stream, crate::services::GateError> {
+                Ok(EchoStream {
+                    yielded: false,
+                    text: self.text.clone(),
+                })
             }
         }
 
@@ -154,7 +168,9 @@ impl Commands {
             tools_requested: vec![],
         };
         let contract = ContractsDecider;
-        let model = TextEchoModel { text: input.to_string() };
+        let model = TextEchoModel {
+            text: input.to_string(),
+        };
         let runtime = StreamRuntime { contract, model };
         let result = runtime.generate(proposal).map_err(|e| anyhow!(e.0))?;
 

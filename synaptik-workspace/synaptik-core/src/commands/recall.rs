@@ -1,5 +1,5 @@
+use crate::commands::{Commands, HitSource, Prefer, RecallResult, bytes_to_string_owned};
 use anyhow::Result;
-use crate::commands::{HitSource, Prefer, RecallResult, bytes_to_string_owned, Commands};
 
 impl Commands {
     /// Newest → oldest memory_ids for a lobe.
@@ -142,7 +142,14 @@ impl Commands {
                     .db
                     .prepare("SELECT value FROM \"values\" WHERE state_id=?1")
                     .ok()
-                    .and_then(|mut st| st.query([id]).ok().and_then(|mut rows| rows.next().ok().flatten().and_then(|row| row.get::<_, f32>(0).ok())));
+                    .and_then(|mut st| {
+                        st.query([id]).ok().and_then(|mut rows| {
+                            rows.next()
+                                .ok()
+                                .flatten()
+                                .and_then(|row| row.get::<_, f32>(0).ok())
+                        })
+                    });
                 (val, id)
             })
             .collect();

@@ -1,12 +1,12 @@
 // src/commands/mod.rs
 mod api;
-pub mod helpers;
 pub mod bind;
-pub mod replay;
-pub mod recall;
-pub mod pons;
-pub mod init;
 pub mod contracts;
+pub mod helpers;
+pub mod init;
+pub mod pons;
+pub mod recall;
+pub mod replay;
 
 use serde::Serialize;
 

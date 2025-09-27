@@ -2,7 +2,8 @@ use contracts::evaluator::{evaluate_input_against_rules, load_contract_from_file
 use contracts::types::MoralContract;
 
 fn setup_nonviolence_contract() -> MoralContract {
-    load_contract_from_file("./assets/nonviolence.toml").expect("failed to load nonviolence contract")
+    load_contract_from_file("./assets/nonviolence.toml")
+        .expect("failed to load nonviolence contract")
 }
 
 #[test]
@@ -71,7 +72,8 @@ fn test_violent_tool_suggestion() {
 
 #[test]
 fn test_justification_of_violence_with_constraints() {
-    let contract = load_contract_from_file("./assets/nonviolence.toml").expect("failed to load nonviolence contract");
+    let contract = load_contract_from_file("./assets/nonviolence.toml")
+        .expect("failed to load nonviolence contract");
     let result = evaluate_input_against_rules("They had it coming.", &contract);
     assert!(!result.passed);
     assert_eq!(

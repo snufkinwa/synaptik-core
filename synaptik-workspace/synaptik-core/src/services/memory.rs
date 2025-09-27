@@ -11,12 +11,12 @@ use anyhow::{Context, Result, bail};
 use blake3;
 use chrono::Utc;
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::memory::dag;
 use crate::config::SummarizerKind;
+use crate::memory::dag;
 use crate::services::audit;
 use crate::services::ethos::{Proposal, RuntimeDecision};
 use crate::services::streamgate::Finalized;
@@ -470,12 +470,14 @@ impl Memory {
     ) -> Result<Vec<MemoryCandidate>> {
         // Use fixed SQL variants to avoid interpolating ORDER BY dynamically.
         // This eliminates any possibility of SQL injection via ORDER BY fragments.
-        const SQL_BY_CREATED: &str =
-            "SELECT memory_id, archived_cid FROM memories WHERE lobe=?1 ORDER BY created_at ASC LIMIT ?2";
-        const SQL_BY_UPDATED: &str =
-            "SELECT memory_id, archived_cid FROM memories WHERE lobe=?1 ORDER BY updated_at DESC LIMIT ?2";
+        const SQL_BY_CREATED: &str = "SELECT memory_id, archived_cid FROM memories WHERE lobe=?1 ORDER BY created_at ASC LIMIT ?2";
+        const SQL_BY_UPDATED: &str = "SELECT memory_id, archived_cid FROM memories WHERE lobe=?1 ORDER BY updated_at DESC LIMIT ?2";
 
-        let sql = if prefer_rarely_accessed { SQL_BY_CREATED } else { SQL_BY_UPDATED };
+        let sql = if prefer_rarely_accessed {
+            SQL_BY_CREATED
+        } else {
+            SQL_BY_UPDATED
+        };
         let mut stmt = self.db.prepare(sql)?;
         let iter = stmt.query_map((lobe, top_k as i64), |row| {
             Ok(MemoryCandidate {
@@ -494,7 +496,14 @@ impl Memory {
                 .db
                 .prepare("SELECT value FROM \"values\" WHERE state_id=?1")
                 .ok()
-                .and_then(|mut st| st.query([&c.id]).ok().and_then(|mut rows| rows.next().ok().flatten().and_then(|row| row.get::<_, f32>(0).ok())));
+                .and_then(|mut st| {
+                    st.query([&c.id]).ok().and_then(|mut rows| {
+                        rows.next()
+                            .ok()
+                            .flatten()
+                            .and_then(|row| row.get::<_, f32>(0).ok())
+                    })
+                });
             with_scores.push((score, c));
         }
         // Sort by score ascending (None last)
@@ -558,10 +567,14 @@ impl Memory {
                 let mut out = String::new();
                 let mut sentences = 0usize;
                 for sent in split_sentences(text) {
-                    if !out.is_empty() { out.push(' '); }
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
                     out.push_str(&sent);
                     sentences += 1;
-                    if sentences >= 2 || out.len() >= 400 { break; }
+                    if sentences >= 2 || out.len() >= 400 {
+                        break;
+                    }
                 }
                 if out.is_empty() {
                     out = text.chars().take(400).collect();
@@ -572,10 +585,14 @@ impl Memory {
                 let mut out = String::new();
                 let mut sentences = 0usize;
                 for sent in split_sentences(text) {
-                    if !out.is_empty() { out.push(' '); }
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
                     out.push_str(&sent);
                     sentences += 1;
-                    if sentences >= 3 || out.len() >= 600 { break; }
+                    if sentences >= 3 || out.len() >= 600 {
+                        break;
+                    }
                 }
                 if out.is_empty() {
                     out = text.chars().take(600).collect();
@@ -584,17 +601,30 @@ impl Memory {
             }
             SummarizerKind::Minimal => {
                 let s = first_lines(text, 2);
-                if s.is_empty() { text.lines().next().unwrap_or("").chars().take(160).collect() } else { s }
+                if s.is_empty() {
+                    text.lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(160)
+                        .collect()
+                } else {
+                    s
+                }
             }
             SummarizerKind::Compressive => {
                 // Placeholder: behave like heuristic but tighter budget
                 let mut out = String::new();
                 let mut sentences = 0usize;
                 for sent in split_sentences(text) {
-                    if !out.is_empty() { out.push(' '); }
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
                     out.push_str(&sent);
                     sentences += 1;
-                    if sentences >= 2 || out.len() >= 256 { break; }
+                    if sentences >= 2 || out.len() >= 256 {
+                        break;
+                    }
                 }
                 if out.is_empty() {
                     out = text.chars().take(256).collect();
@@ -611,7 +641,9 @@ impl Memory {
 fn contracts_store() -> Option<&'static ContractsStore> {
     // Cache only successful initialization; failed attempts do NOT poison the cell, allowing retries.
     static CELL: OnceCell<ContractsStore> = OnceCell::new();
-    if let Some(store) = CELL.get() { return Some(store); }
+    if let Some(store) = CELL.get() {
+        return Some(store);
+    }
     let root_dir = match crate::commands::init::ensure_initialized_once() {
         Ok(r) => r.config.contracts.path.join("caps_store"),
         Err(_) => return None,

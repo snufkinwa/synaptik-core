@@ -1,9 +1,9 @@
-use crate::types::{ContractRule, MoralContract};
 use crate::normalize::for_rules;
+use crate::types::{ContractRule, MoralContract};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use std::{collections::HashSet, fs, thread, time::Duration};
-use rand::{Rng, SeedableRng};
-use rand::rngs::StdRng;
 use toml;
 
 // ----------------- Result -----------------
@@ -28,13 +28,16 @@ pub type LoadResult<T> = std::result::Result<T, LoadError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
-    #[error("io: {0}")] Io(#[from] std::io::Error),
-    #[error("empty_after_retries path={path}")] Empty { path: String },
-    #[error("parse path={path} error={err}")] Parse { path: String, err: String },
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("empty_after_retries path={path}")]
+    Empty { path: String },
+    #[error("parse path={path} error={err}")]
+    Parse { path: String, err: String },
 }
 
 /// Exponential backoff schedule (ms) with jitter 0..=10 ms added each attempt.
-const BACKOFF_SERIES: [u64;5] = [25, 50, 100, 200, 400];
+const BACKOFF_SERIES: [u64; 5] = [25, 50, 100, 200, 400];
 
 /// Attempt to load and parse a contract with resilience and without panicking.
 /// Returns a MoralContract on success or a LoadError. Caller may decide to fallback.
@@ -47,7 +50,9 @@ pub fn load_contract_from_file(path: &str) -> LoadResult<MoralContract> {
                 if c.trim().is_empty() {
                     last_content = c;
                     if i + 1 == BACKOFF_SERIES.len() {
-                        return Err(LoadError::Empty { path: path.to_string() });
+                        return Err(LoadError::Empty {
+                            path: path.to_string(),
+                        });
                     }
                 } else {
                     last_content = c;
@@ -66,7 +71,10 @@ pub fn load_contract_from_file(path: &str) -> LoadResult<MoralContract> {
     }
 
     ATP_COUNTER.fetch_add(ATP_COST_LOAD, std::sync::atomic::Ordering::Relaxed);
-    toml::from_str(&last_content).map_err(|e| LoadError::Parse { path: path.to_string(), err: e.to_string() })
+    toml::from_str(&last_content).map_err(|e| LoadError::Parse {
+        path: path.to_string(),
+        err: e.to_string(),
+    })
 }
 
 /// Fallback helper: attempt load, else synthesize a minimal inert contract so callers can proceed.
@@ -75,8 +83,13 @@ pub fn load_or_default(path: &str) -> MoralContract {
         Ok(c) => c,
         Err(e) => {
             // Minimal transparent fallback contract (no rules) to keep pipeline alive; log via eprintln.
-            eprintln!("[contracts] fallback to empty contract: {}", e);
-            MoralContract { name: "fallback".into(), version: "0".into(), description: Some("Empty fallback contract".into()), rules: vec![] }
+            eprintln!("[contracts] fallback to empty contract: {e}");
+            MoralContract {
+                name: "fallback".into(),
+                version: "0".into(),
+                description: Some("Empty fallback contract".into()),
+                rules: vec![],
+            }
         }
     }
 }
@@ -95,12 +108,19 @@ pub struct AtpSession {
     start: u64,
 }
 impl AtpSession {
-    pub fn start() -> Self { Self { start: ATP_COUNTER.load(_Ordering::Relaxed) } }
-    pub fn delta(&self) -> u64 { ATP_COUNTER.load(_Ordering::Relaxed).saturating_sub(self.start) }
+    pub fn start() -> Self {
+        Self {
+            start: ATP_COUNTER.load(_Ordering::Relaxed),
+        }
+    }
+    pub fn delta(&self) -> u64 {
+        ATP_COUNTER
+            .load(_Ordering::Relaxed)
+            .saturating_sub(self.start)
+    }
 }
 
 // ----------------- Helpers -----------------
-
 
 fn severity_rank(s: Option<&str>) -> i32 {
     match s {

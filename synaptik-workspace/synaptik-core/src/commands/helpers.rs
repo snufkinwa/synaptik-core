@@ -60,7 +60,8 @@ pub fn recent_ids_in_lobe(memory: &Memory, lobe: &str, limit: usize) -> Result<V
          LIMIT ?2",
     )?;
     use std::convert::TryFrom;
-    let limit_i64 = i64::try_from(limit).map_err(|_| anyhow::anyhow!("limit out of range for i64: {limit}"))?;
+    let limit_i64 =
+        i64::try_from(limit).map_err(|_| anyhow::anyhow!("limit out of range for i64: {limit}"))?;
     let rows = stmt.query_map((lobe, limit_i64), |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for r in rows {
@@ -100,7 +101,8 @@ pub fn group_by_lobe(memory: &Memory, limit: usize) -> Result<Vec<(String, u64)>
         "SELECT lobe, COUNT(*) as c FROM memories GROUP BY lobe ORDER BY c DESC LIMIT ?1",
     )?;
     use std::convert::TryFrom;
-    let limit_i64 = i64::try_from(limit).map_err(|_| anyhow::anyhow!("limit out of range for i64: {limit}"))?;
+    let limit_i64 =
+        i64::try_from(limit).map_err(|_| anyhow::anyhow!("limit out of range for i64: {limit}"))?;
     let rows = stmt.query_map([limit_i64], |r| {
         let l: String = r.get(0)?;
         let c: i64 = r.get(1)?;
@@ -122,4 +124,3 @@ pub fn max_updated(memory: &Memory) -> Result<Option<String>> {
     }
     Ok(None)
 }
-

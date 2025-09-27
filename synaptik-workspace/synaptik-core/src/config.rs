@@ -265,7 +265,9 @@ pub struct CompactionPolicy {
 }
 
 impl CompactionPolicy {
-    fn default_archive_to_dag() -> bool { true }
+    fn default_archive_to_dag() -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -304,14 +306,30 @@ impl ContractsConfig {
     fn default_contract() -> String {
         "nonviolence.toml".to_string()
     }
-    fn default_accept_custom() -> bool { true }
-    fn default_require_signature() -> bool { false }
-    fn default_max_rules() -> usize { 500 }
-    fn default_max_pattern_len() -> usize { 256 }
-    fn default_max_file_kb() -> usize { 256 }
-    fn default_wasm_enabled() -> bool { false }
-    fn default_wasm_module_path() -> PathBuf { PathBuf::from("contracts/contract_eval.wasm") }
-    fn default_wasm_export() -> String { "evaluate_contract".into() }
+    fn default_accept_custom() -> bool {
+        true
+    }
+    fn default_require_signature() -> bool {
+        false
+    }
+    fn default_max_rules() -> usize {
+        500
+    }
+    fn default_max_pattern_len() -> usize {
+        256
+    }
+    fn default_max_file_kb() -> usize {
+        256
+    }
+    fn default_wasm_enabled() -> bool {
+        false
+    }
+    fn default_wasm_module_path() -> PathBuf {
+        PathBuf::from("contracts/contract_eval.wasm")
+    }
+    fn default_wasm_export() -> String {
+        "evaluate_contract".into()
+    }
 }
 
 impl Default for ContractsConfig {

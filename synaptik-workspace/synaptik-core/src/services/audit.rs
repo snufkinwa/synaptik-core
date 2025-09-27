@@ -8,11 +8,11 @@ use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cmp::Ordering as CmpOrdering;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::cmp::Ordering as CmpOrdering;
 
 use crate::commands::init::ensure_initialized_once;
 use crate::config::{CoreConfig, PoliciesConfig};

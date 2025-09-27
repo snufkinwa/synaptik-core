@@ -1,21 +1,21 @@
 // Public modules so synaptik-core can use them
-pub mod assets;
-pub mod evaluator;
-pub mod types;
-pub mod capsule;
-pub mod patch;
 pub mod api;
-pub mod store;
+pub mod assets;
+pub mod capsule;
+pub mod evaluator;
 pub mod normalize;
+pub mod patch;
+pub mod store;
+pub mod types;
 
+pub use api::{CapsAnnot, CapsId, Contract, Denied, PatchId, Purpose, Verdict};
 pub use assets::{default_contract_text, write_default_contracts};
+pub use capsule::{ArtifactRef, CapsuleMeta, CapsuleSource, SimCapsule};
 pub use evaluator::{evaluate_input_against_rules, load_contract_from_file, EvaluationResult};
-pub use types::MoralContract;
-pub use api::{Verdict, CapsAnnot, Contract, Purpose, Denied, CapsId, PatchId};
-pub use capsule::{SimCapsule, CapsuleMeta, CapsuleSource, ArtifactRef};
-pub use patch::{PatchPlan, PatchOp};
-pub use store::{ContractsStore, CapsHandle};
 pub use normalize::for_rules as normalize_for_rules;
+pub use patch::{PatchOp, PatchPlan};
+pub use store::{CapsHandle, ContractsStore};
+pub use types::MoralContract;
 
 /// --- Pure Rust API for synaptik-core ---
 pub fn evaluate_contract_json(

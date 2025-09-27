@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::capsule::SimCapsule;
+use serde::{Deserialize, Serialize};
 
 pub type CapsId = String;
 pub type PatchId = String;
@@ -124,7 +124,10 @@ pub fn uuidv7() -> String {
         bytes[6] = (bytes[6] & 0x0F) | 0x70; // version
         bytes[8] = (bytes[8] & 0x3F) | 0x80; // variant
 
-        fn hex(b: &[u8]) -> String { b.iter().map(|v| format!("{:02x}", v)).collect() }
+        fn hex(b: &[u8]) -> String {
+            b.iter().map(|v| format!("{v:02x}"))
+                .collect()
+        }
 
         return format!(
             "{}-{}-{}-{}-{}",
@@ -136,4 +139,3 @@ pub fn uuidv7() -> String {
         );
     }
 }
-

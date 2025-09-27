@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ impl Commands {
                 return Err(anyhow!(
                     "no embedded canon for contract {:?}; cannot reinstate",
                     name
-                ))
+                ));
             }
         };
         if let Some(parent) = target.parent() {
@@ -89,8 +89,12 @@ impl Commands {
         );
 
         if apply {
-            let target = apply_path.map(|p| p.to_path_buf()).unwrap_or(local_path.clone());
-            if let Some(parent) = target.parent() { let _ = fs::create_dir_all(parent); }
+            let target = apply_path
+                .map(|p| p.to_path_buf())
+                .unwrap_or(local_path.clone());
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
             fs::write(&target, binding.as_bytes())?;
             record_action(
                 "commands",

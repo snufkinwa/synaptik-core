@@ -55,7 +55,11 @@ impl Archivist {
     /// - **Does not** touch SQLite. Caller (Librarian) must update Memory.
     pub fn archive(&self, memory_id: &str, bytes: &[u8]) -> Result<String> {
         if bytes.len() > Self::MAX_OBJECT_BYTES {
-            anyhow::bail!("archive object too large: {} bytes (max {})", bytes.len(), Self::MAX_OBJECT_BYTES);
+            anyhow::bail!(
+                "archive object too large: {} bytes (max {})",
+                bytes.len(),
+                Self::MAX_OBJECT_BYTES
+            );
         }
         let cid = blake3::hash(bytes).to_hex().to_string();
 

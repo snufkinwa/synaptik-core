@@ -33,7 +33,8 @@ pub fn assert_within_root_abs(root_abs: &Path, candidate_abs: &Path) -> Result<P
     if !resolved.starts_with(&root) {
         anyhow::bail!(
             "path escapes root: path={:?} root={:?}",
-            candidate_abs, root
+            candidate_abs,
+            root
         );
     }
     Ok(resolved)
@@ -50,4 +51,3 @@ pub fn resolve_rel_within_root(root_abs: &Path, rel: &Path) -> Result<PathBuf> {
         .with_context(|| format!("canonicalize root {:?}", root_abs))?;
     Ok(root.join(rel))
 }
-

@@ -1,9 +1,9 @@
-use pyo3::prelude::*;
 use ::synaptik_core::commands::init;
+use pyo3::prelude::*;
 
+mod py_commands;
 mod py_helpers;
 mod py_streamgate;
-mod py_commands;
 
 pub use py_commands::PyCommands;
 pub use py_streamgate::{PyGateDecision, PyStreamGate};

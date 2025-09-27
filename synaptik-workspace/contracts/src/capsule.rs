@@ -19,16 +19,13 @@ pub struct ArtifactRef {
     pub meta: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CapsuleSource {
+    #[default]
     Real,
     Sim,
     Derived,
-}
-
-impl Default for CapsuleSource {
-    fn default() -> Self { CapsuleSource::Real }
 }
 
 /// Capsule metadata that is intrinsic to the experience unit.

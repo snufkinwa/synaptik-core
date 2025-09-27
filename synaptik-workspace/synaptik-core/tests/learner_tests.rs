@@ -5,7 +5,9 @@ use synaptik_core::services::learner::StepAssembler;
 use synaptik_core::services::memory::Memory;
 
 fn open_sqlite<P: AsRef<std::path::Path>>(p: P) -> Connection {
-    if let Some(parent) = p.as_ref().parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Some(parent) = p.as_ref().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     Connection::open(p).expect("open sqlite")
 }
 
@@ -42,7 +44,8 @@ fn learner_td_updates_and_is_distinct_from_remember_recall() {
             ts_ms INTEGER NOT NULL
         );
         "#,
-    ).expect("init schema");
+    )
+    .expect("init schema");
 
     // 1) Pure memory I/O should not touch `values`
     let id = "chat_s1";
@@ -90,7 +93,8 @@ fn assembler_record_from_reward_finds_next_state_in_lobe() {
             ts_ms INTEGER NOT NULL
         );
         "#,
-    ).expect("init schema");
+    )
+    .expect("init schema");
 
     // Write two states in the same lobe with distinct timestamps
     let s1 = "chat_s1";
@@ -112,7 +116,7 @@ fn assembler_record_from_reward_finds_next_state_in_lobe() {
         .unwrap()
         .with_timezone(&chrono::Utc)
         + chrono::Duration::milliseconds(1))
-        .timestamp_millis();
+    .timestamp_millis();
 
     let asm = StepAssembler::open_at(db_path.clone()).expect("asm");
     asm.record_from_reward("chat", s1, "caps_action", 0.1, ts_ms)

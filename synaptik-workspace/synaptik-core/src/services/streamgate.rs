@@ -1,9 +1,9 @@
 // synaptik-core/src/services/streamgate.rs
 
 use anyhow::Result;
-use serde::Serialize;
-use contracts::types::{ContractRule, MoralContract};
 use contracts::normalize::for_rules;
+use contracts::types::{ContractRule, MoralContract};
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,7 +22,9 @@ pub struct StreamGateConfig {
 }
 
 // Normalization delegated to contracts::normalize to keep consistent with evaluator.
-fn norm(s: &str) -> String { for_rules(s) }
+fn norm(s: &str) -> String {
+    for_rules(s)
+}
 
 /// Minimal evaluation result to satisfy your debug test
 #[derive(Debug, Clone)]
@@ -259,18 +261,36 @@ pub struct Finalized {
 
 impl Finalized {
     pub fn ok(text: String) -> Self {
-        Self { status: FinalizedStatus::Ok, text, violation_label: None }
+        Self {
+            status: FinalizedStatus::Ok,
+            text,
+            violation_label: None,
+        }
     }
     pub fn violated(text: String, label: String) -> Self {
-        Self { status: FinalizedStatus::Violated, text, violation_label: Some(label) }
+        Self {
+            status: FinalizedStatus::Violated,
+            text,
+            violation_label: Some(label),
+        }
     }
     pub fn stopped(template: String) -> Self {
-        Self { status: FinalizedStatus::Stopped, text: template, violation_label: None }
+        Self {
+            status: FinalizedStatus::Stopped,
+            text: template,
+            violation_label: None,
+        }
     }
     pub fn escalated(reason: String) -> Self {
-        Self { status: FinalizedStatus::Escalated, text: reason, violation_label: None }
+        Self {
+            status: FinalizedStatus::Escalated,
+            text: reason,
+            violation_label: None,
+        }
     }
-    pub fn is_ok(&self) -> bool { matches!(self.status, FinalizedStatus::Ok) }
+    pub fn is_ok(&self) -> bool {
+        matches!(self.status, FinalizedStatus::Ok)
+    }
 }
 
 #[derive(Debug)]
@@ -297,9 +317,9 @@ pub struct StreamRuntime<C: EthosContract, M: LlmClient> {
 impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
     pub fn generate(&self, p: Proposal) -> std::result::Result<Finalized, GateError> {
         // Global safeguards to prevent resource exhaustion in absence of explicit constraints
-        const DEFAULT_MAX_TOKENS: usize = 512;           // fallback token cap
+        const DEFAULT_MAX_TOKENS: usize = 512; // fallback token cap
         const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64 KiB output cap
-        const DEFAULT_BUDGET_MS: u128 = 3_000;           // wall-clock budget
+        const DEFAULT_BUDGET_MS: u128 = 3_000; // wall-clock budget
 
         let decision = self.contract.evaluate(&p);
         audit::log_proposal(&p, &decision);
@@ -370,9 +390,16 @@ impl<C: EthosContract, M: LlmClient> StreamRuntime<C, M> {
                         let target = buf.len() - window_bytes;
                         // Find nearest char boundary <= target.
                         let mut start = 0usize;
-                        for (i, _) in buf.char_indices() { if i <= target { start = i; } else { break; } }
+                        for (i, _) in buf.char_indices() {
+                            if i <= target {
+                                start = i;
+                            } else {
+                                break;
+                            }
+                        }
                         let tail = buf[start..].to_string();
-                        let masked_tail = crate::services::masking::apply_masks_ci(&tail, &spec.mask_rules);
+                        let masked_tail =
+                            crate::services::masking::apply_masks_ci(&tail, &spec.mask_rules);
                         buf.truncate(start);
                         buf.push_str(&masked_tail);
                     }
@@ -434,13 +461,19 @@ fn prompt_compile(p: &Proposal, spec: Option<&ConstraintSpec>) -> String {
     lines.join("\n")
 }
 
-fn norm_lower(s: &str) -> String { for_rules(s) }
+fn norm_lower(s: &str) -> String {
+    for_rules(s)
+}
 
 fn hits_stop_phrase(buf: &str, tok: &str, stop_phrases: &[String]) -> bool {
-    if stop_phrases.is_empty() { return false; }
+    if stop_phrases.is_empty() {
+        return false;
+    }
     let binding = format!("{}{}", buf, tok);
     let hay = norm_lower(&binding);
-    stop_phrases.iter().any(|s| !s.is_empty() && hay.contains(&norm_lower(s)))
+    stop_phrases
+        .iter()
+        .any(|s| !s.is_empty() && hay.contains(&norm_lower(s)))
 }
 
 // Build a normalized view (case / rule normalization) along with original byte spans.
@@ -450,7 +483,9 @@ fn hits_stop_phrase(buf: &str, tok: &str, stop_phrases: &[String]) -> bool {
 // normalized_chars_with_spans and apply_masks moved to crate::services::masking
 
 fn token_limit_reached(buf: &str, max_tokens: usize) -> bool {
-    if max_tokens == 0 { return false; }
+    if max_tokens == 0 {
+        return false;
+    }
     // rough approximation: whitespace tokens
     let cnt = buf.split_whitespace().count();
     cnt >= max_tokens

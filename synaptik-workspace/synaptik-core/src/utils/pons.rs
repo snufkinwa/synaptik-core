@@ -87,9 +87,7 @@ impl PonsStore {
         let root = root.into();
         // Ensure base exists then store canonicalized root for containment checks.
         fs::create_dir_all(root.join(OBJECTS_DIR))?;
-        let canon_root = root
-            .canonicalize()
-            .unwrap_or(root); // if canonicalize fails (unusual), keep as-is
+        let canon_root = root.canonicalize().unwrap_or(root); // if canonicalize fails (unusual), keep as-is
         Ok(Self { root: canon_root })
     }
 
@@ -182,7 +180,9 @@ impl PonsStore {
         let mut buf = vec![0u8; 1 << 20]; // 1 MiB buffer
         loop {
             let n = f.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
         }
         let etag = hasher.finalize().to_hex().to_string();
@@ -191,7 +191,9 @@ impl PonsStore {
 
         // Copy to versioned destination atomically
         let data_path = data_path(&versions_dir, &version_id);
-        if let Some(parent) = data_path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = data_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let tmp = data_path.with_extension("tmp");
         {
             let mut out = fs::File::create(&tmp)?;

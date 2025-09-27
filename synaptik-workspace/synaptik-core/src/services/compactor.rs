@@ -1,18 +1,18 @@
 // src/services/compactor.rs
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+use crate::commands::init::ensure_initialized_once;
 use crate::config::{CompactionPolicy, SummarizerKind};
 use crate::services::memory::{Memory, MemoryCandidate};
-use crate::commands::init::ensure_initialized_once;
-use contracts::{EvaluationResult, MoralContract, Verdict};
-use contracts::evaluator::load_or_default;
-use contracts::{evaluate_input_against_rules};
-use crate::utils::pons::PonsStore;
 use crate::services::reward::RewardSink;
-use contracts::capsule::{SimCapsule, CapsuleMeta, CapsuleSource};
+use crate::utils::pons::PonsStore;
 use contracts::api::CapsAnnot;
+use contracts::capsule::{CapsuleMeta, CapsuleSource, SimCapsule};
+use contracts::evaluate_input_against_rules;
+use contracts::evaluator::load_or_default;
 use contracts::store::ContractsStore;
+use contracts::{EvaluationResult, MoralContract, Verdict};
 use once_cell::sync::OnceCell;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -21,8 +21,8 @@ pub struct CompactionReport {
     pub dry_run: bool,
     pub candidates: usize,
     pub archived: usize,
-    pub compressed: usize,   // summarized & replaced when not dry_run
-    pub regrets: usize,      // failed ethos / rejected summaries
+    pub compressed: usize, // summarized & replaced when not dry_run
+    pub regrets: usize,    // failed ethos / rejected summaries
     pub notes: Vec<String>,
 }
 
@@ -65,7 +65,11 @@ impl<'a> Compactor<'a> {
             .memory
             .select_compaction_candidates(lobe, top_k, prefer_rarely)?;
         report.candidates = candidates.len();
-        report.notes.push(format!("selected {} candidates (top_k={})", candidates.len(), top_k));
+        report.notes.push(format!(
+            "selected {} candidates (top_k={})",
+            candidates.len(),
+            top_k
+        ));
 
         if candidates.is_empty() {
             report.notes.push("no candidates -> done".into());
@@ -83,18 +87,24 @@ impl<'a> Compactor<'a> {
                 }
             }
         } else if dry_run && policy.archive_to_dag {
-            report.notes.push("dry_run: would archive un-archived candidates".into());
+            report
+                .notes
+                .push("dry_run: would archive un-archived candidates".into());
         }
 
         // 3) summarization / replacement pipeline
         if dry_run {
             report.compressed = report.candidates;
-            report.notes.push("dry_run: counted candidates as 'compressed' (no mutation)".into());
+            report
+                .notes
+                .push("dry_run: counted candidates as 'compressed' (no mutation)".into());
             return Ok(report);
         }
 
         if let Err(e) = self.summarize_and_replace(lobe, &candidates, policy, &mut report) {
-            report.notes.push(format!("summarization pass encountered error: {}", e));
+            report
+                .notes
+                .push(format!("summarization pass encountered error: {}", e));
         }
 
         Ok(report)
@@ -132,7 +142,9 @@ impl<'a> Compactor<'a> {
             // Sidecar store of original for external audit (best-effort).
             if let Some(pons) = self.pons {
                 if let Err(e) = pons.store_original(lobe, &c.id, &original) {
-                    report.notes.push(format!("pons store_original failed {}: {}", c.id, e));
+                    report
+                        .notes
+                        .push(format!("pons store_original failed {}: {}", c.id, e));
                 }
             }
 
@@ -140,7 +152,9 @@ impl<'a> Compactor<'a> {
             let summary = match self.invoke_summarizer(&original, summarizer.clone()) {
                 Ok(s) => s,
                 Err(e) => {
-                    report.notes.push(format!("summarizer failed {}: {}", c.id, e));
+                    report
+                        .notes
+                        .push(format!("summarizer failed {}: {}", c.id, e));
                     report.regrets += 1;
                     continue;
                 }
@@ -153,7 +167,8 @@ impl<'a> Compactor<'a> {
                 match verdict {
                     (Verdict::Allow, _pat, risk, reason) => (Verdict::Allow, risk, reason, false),
                     (Verdict::AllowWithPatch, Some(patterns), risk, reason) => {
-                        final_summary = crate::services::masking::apply_masks_ci(&final_summary, &patterns);
+                        final_summary =
+                            crate::services::masking::apply_masks_ci(&final_summary, &patterns);
                         report.notes.push(format!(
                             "patched summary {} with {} mask(s)",
                             c.id,
@@ -167,7 +182,9 @@ impl<'a> Compactor<'a> {
                     (Verdict::Quarantine, _p, risk, reason) => {
                         // Preserve legacy wording expected by tests.
                         report.notes.push(match reason.clone() {
-                            Some(r) => format!("ethos rejected summary {} (risk={:.2}): {}", c.id, risk, r),
+                            Some(r) => {
+                                format!("ethos rejected summary {} (risk={:.2}): {}", c.id, risk, r)
+                            }
                             None => format!("ethos rejected summary {} (risk={:.2})", c.id, risk),
                         });
                         report.regrets += 1;
@@ -209,14 +226,22 @@ impl<'a> Compactor<'a> {
                 let store_clone = store.clone();
                 let mem_id = c.id.clone();
                 let lobe_c = lobe.to_string();
-                let annot = CapsAnnot { verdict: verdict_variant, risk: risk_score, labels, policy_ver: "default".into(), patch_id: None, ts_ms: now_ms };
+                let annot = CapsAnnot {
+                    verdict: verdict_variant,
+                    risk: risk_score,
+                    labels,
+                    policy_ver: "default".into(),
+                    patch_id: None,
+                    ts_ms: now_ms,
+                };
                 std::thread::spawn(move || {
                     if let Ok(handle) = store_clone.ingest_capsule(cap) {
                         let _ = store_clone.map_memory(&mem_id, &handle.id);
                         let _ = store_clone.annotate(&handle.id, &annot);
 
                         // Publish reward event (best-effort)
-                        if let Ok(sink) = crate::services::reward::RewardSqliteSink::open_default() {
+                        if let Ok(sink) = crate::services::reward::RewardSqliteSink::open_default()
+                        {
                             let parent = store_clone.capsule_for_memory(&mem_id).ok().flatten();
                             let ev = crate::services::reward::RewardEvent {
                                 lobe: lobe_c.clone(),
@@ -233,7 +258,13 @@ impl<'a> Compactor<'a> {
 
                         // Assemble step and update value: use memory_id as state, no next_state yet.
                         if let Ok(asm) = crate::services::learner::StepAssembler::open_default() {
-                            let _ = asm.record_from_reward(&lobe_c, &mem_id, &handle.id, crate::services::reward::reward_from_annotation(&annot), annot.ts_ms as i64);
+                            let _ = asm.record_from_reward(
+                                &lobe_c,
+                                &mem_id,
+                                &handle.id,
+                                crate::services::reward::reward_from_annotation(&annot),
+                                annot.ts_ms as i64,
+                            );
                         }
                     }
                 });
@@ -241,7 +272,9 @@ impl<'a> Compactor<'a> {
 
             // Replace memory content with final (possibly patched) summary (original archived/sidecar).
             if let Err(e) = self.memory.replace_with_summary(&c.id, &final_summary) {
-                report.notes.push(format!("replace_with_summary failed {}: {}", c.id, e));
+                report
+                    .notes
+                    .push(format!("replace_with_summary failed {}: {}", c.id, e));
                 report.regrets += 1;
                 continue;
             }
@@ -307,11 +340,14 @@ impl<'a> Compactor<'a> {
         ))
     }
 
-    fn eval_summary_with_contracts(&self, summary: &str) -> Result<(Verdict, Option<Vec<String>>, f32, Option<String>)> {
+    fn eval_summary_with_contracts(
+        &self,
+        summary: &str,
+    ) -> Result<(Verdict, Option<Vec<String>>, f32, Option<String>)> {
         // Load default contract from configured directory and evaluate text.
         let cfg = ensure_initialized_once()?.config.clone();
         let contract_path = cfg.contracts.path.join(&cfg.contracts.default_contract);
-    let mc: MoralContract = load_or_default(contract_path.to_string_lossy().as_ref());
+        let mc: MoralContract = load_or_default(contract_path.to_string_lossy().as_ref());
         let res: EvaluationResult = evaluate_input_against_rules(summary, &mc);
 
         // Map severity to a simple risk score for scaffolding.
@@ -325,7 +361,13 @@ impl<'a> Compactor<'a> {
             }
         }
         fn sev_to_risk(rank: i32) -> f32 {
-            match rank { 4 => 1.0, 3 => 0.75, 2 => 0.5, 1 => 0.25, _ => 0.0 }
+            match rank {
+                4 => 1.0,
+                3 => 0.75,
+                2 => 0.5,
+                1 => 0.25,
+                _ => 0.0,
+            }
         }
 
         if res.passed {
@@ -338,23 +380,34 @@ impl<'a> Compactor<'a> {
             let t = c.trim();
             if let Some(stripped) = t.strip_prefix("mask:") {
                 let p = stripped.trim();
-                if !p.is_empty() { mask_patterns.push(p.to_string()); }
+                if !p.is_empty() {
+                    mask_patterns.push(p.to_string());
+                }
             } else if let Some(stripped) = t.strip_prefix("redact:") {
                 let p = stripped.trim();
-                if !p.is_empty() { mask_patterns.push(p.to_string()); }
+                if !p.is_empty() {
+                    mask_patterns.push(p.to_string());
+                }
             }
         }
 
         let mut max_rank = 0;
         for r in &res.violated_rules {
             let rank = sev_rank(r.severity.as_deref());
-            if rank > max_rank { max_rank = rank; }
+            if rank > max_rank {
+                max_rank = rank;
+            }
         }
         let risk = sev_to_risk(max_rank);
         let reason = res.reason.clone();
 
         if !mask_patterns.is_empty() {
-            Ok((Verdict::AllowWithPatch, Some(mask_patterns), risk, Some(reason)))
+            Ok((
+                Verdict::AllowWithPatch,
+                Some(mask_patterns),
+                risk,
+                Some(reason),
+            ))
         } else {
             Ok((Verdict::Quarantine, None, risk, Some(reason)))
         }
@@ -373,7 +426,8 @@ fn contracts_store() -> Option<&'static ContractsStore> {
             Some(dir) => ContractsStore::new(dir).ok(),
             None => None,
         }
-    }).as_ref()
+    })
+    .as_ref()
 }
 
 // Masking helpers are centralized in crate::services::masking

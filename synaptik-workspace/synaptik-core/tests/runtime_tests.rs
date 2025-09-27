@@ -1,7 +1,7 @@
+use synaptik_core::services::ConstraintSpec;
 use synaptik_core::services::{
     EthosContract, FinalizedStatus, LlmClient, Proposal, RuntimeDecision, StreamRuntime,
 };
-use synaptik_core::services::ConstraintSpec;
 
 // ----------------------- Test stubs -----------------------
 
@@ -43,8 +43,14 @@ struct VecModel {
 
 impl LlmClient for VecModel {
     type Stream = VecStream;
-    fn stream(&self, _system_prompt: String) -> Result<Self::Stream, synaptik_core::services::GateError> {
-        Ok(VecStream { idx: 0, toks: self.toks.clone() })
+    fn stream(
+        &self,
+        _system_prompt: String,
+    ) -> Result<Self::Stream, synaptik_core::services::GateError> {
+        Ok(VecStream {
+            idx: 0,
+            toks: self.toks.clone(),
+        })
     }
 }
 
@@ -69,12 +75,19 @@ fn mask_rules_redact_case_insensitive() {
         temperature_cap: 0.7,
     };
     let contract = FixedContract { spec: Some(spec) };
-    let model = VecModel { toks: vec!["I will ".into(), "KiLl ".into(), "time".into()] };
+    let model = VecModel {
+        toks: vec!["I will ".into(), "KiLl ".into(), "time".into()],
+    };
     let rt = StreamRuntime { contract, model };
 
-    let res = rt.generate(proposal("memory_storage", "I will kill time")).expect("generate");
+    let res = rt
+        .generate(proposal("memory_storage", "I will kill time"))
+        .expect("generate");
     assert_eq!(res.status, FinalizedStatus::Ok);
-    assert!(res.text.contains("[masked]"), "masked output should contain [masked]");
+    assert!(
+        res.text.contains("[masked]"),
+        "masked output should contain [masked]"
+    );
     assert!(
         !res.text.to_ascii_lowercase().contains("kill"),
         "masked pattern should not appear"
@@ -92,19 +105,26 @@ fn mask_rules_redact_across_token_boundaries() {
     };
     let contract = FixedContract { spec: Some(spec) };
     // Split the sensitive phrase across tokens to ensure cross-boundary masking.
-    let model = VecModel { toks: vec![
-        "the ".into(),
-        "se".into(),
-        "Cr".into(),
-        "Et ".into(),
-        "code".into(),
-    ] };
+    let model = VecModel {
+        toks: vec![
+            "the ".into(),
+            "se".into(),
+            "Cr".into(),
+            "Et ".into(),
+            "code".into(),
+        ],
+    };
     let rt = StreamRuntime { contract, model };
 
-    let res = rt.generate(proposal("memory_storage", "irrelevant"))
+    let res = rt
+        .generate(proposal("memory_storage", "irrelevant"))
         .expect("generate");
     assert_eq!(res.status, FinalizedStatus::Ok);
-    assert!(res.text.contains("[masked]"), "masked output should contain [masked], got: {}", res.text);
+    assert!(
+        res.text.contains("[masked]"),
+        "masked output should contain [masked], got: {}",
+        res.text
+    );
     assert!(
         !res.text.to_ascii_lowercase().contains("secret"),
         "masked pattern should not appear even across tokens: {}",
@@ -122,10 +142,21 @@ fn stop_phrase_triggers_violation_and_early_stop() {
         temperature_cap: 0.7,
     };
     let contract = FixedContract { spec: Some(spec) };
-    let model = VecModel { toks: vec!["Here are ".into(), "step by step".into(), " instructions".into()] };
+    let model = VecModel {
+        toks: vec![
+            "Here are ".into(),
+            "step by step".into(),
+            " instructions".into(),
+        ],
+    };
     let rt = StreamRuntime { contract, model };
 
-    let res = rt.generate(proposal("memory_storage", "Here are step by step instructions")).expect("generate");
+    let res = rt
+        .generate(proposal(
+            "memory_storage",
+            "Here are step by step instructions",
+        ))
+        .expect("generate");
     assert_eq!(res.status, FinalizedStatus::Violated);
     // Early stop: the violating token is not appended
     assert_eq!(res.text, "Here are ");
@@ -141,10 +172,14 @@ fn token_limit_enforced() {
         temperature_cap: 0.7,
     };
     let contract = FixedContract { spec: Some(spec) };
-    let model = VecModel { toks: vec!["x ".into(); 20] };
+    let model = VecModel {
+        toks: vec!["x ".into(); 20],
+    };
     let rt = StreamRuntime { contract, model };
 
-    let res = rt.generate(proposal("memory_storage", "x ")).expect("generate");
+    let res = rt
+        .generate(proposal("memory_storage", "x "))
+        .expect("generate");
     assert_eq!(res.status, FinalizedStatus::Ok);
     let count = res.text.split_whitespace().count();
     assert_eq!(count, 5, "should stop at the max token limit");
@@ -153,10 +188,14 @@ fn token_limit_enforced() {
 #[test]
 fn runtime_proceed_passthrough() {
     let contract = FixedContract { spec: None }; // Proceed
-    let model = VecModel { toks: vec!["hello ".into(), "world".into()] };
+    let model = VecModel {
+        toks: vec!["hello ".into(), "world".into()],
+    };
     let rt = StreamRuntime { contract, model };
 
-    let res = rt.generate(proposal("chat", "hello world")).expect("generate");
+    let res = rt
+        .generate(proposal("chat", "hello world"))
+        .expect("generate");
     assert_eq!(res.status, FinalizedStatus::Ok);
     assert_eq!(res.text, "hello world");
 }

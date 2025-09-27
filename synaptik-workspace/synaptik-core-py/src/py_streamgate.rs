@@ -3,8 +3,11 @@ use pyo3::prelude::*;
 use std::sync::Arc;
 
 use contracts::types::MoralContract;
+use syn_core::services::streamgate::{
+    GateDecision as CoreGateDecision, StreamGate as CoreStreamGate, StreamGateConfig,
+    StreamingIndex,
+};
 use synaptik_core as syn_core;
-use syn_core::services::streamgate::{GateDecision as CoreGateDecision, StreamGate as CoreStreamGate, StreamGateConfig, StreamingIndex};
 
 use crate::py_helpers::pyerr;
 
@@ -18,9 +21,18 @@ pub struct PyGateDecision {
 
 fn decision_to_py(decision: CoreGateDecision) -> PyGateDecision {
     match decision {
-        CoreGateDecision::Pass => PyGateDecision { kind: "Pass", message: None },
-        CoreGateDecision::Hold => PyGateDecision { kind: "Hold", message: None },
-        CoreGateDecision::CutAndReplace(msg) => PyGateDecision { kind: "CutAndReplace", message: Some(msg) },
+        CoreGateDecision::Pass => PyGateDecision {
+            kind: "Pass",
+            message: None,
+        },
+        CoreGateDecision::Hold => PyGateDecision {
+            kind: "Hold",
+            message: None,
+        },
+        CoreGateDecision::CutAndReplace(msg) => PyGateDecision {
+            kind: "CutAndReplace",
+            message: Some(msg),
+        },
     }
 }
 
@@ -50,7 +62,11 @@ impl PyStreamGate {
         let arc = Arc::new(index);
         let gate = CoreStreamGate::from_index(
             arc.clone(),
-            StreamGateConfig { budget_ms, window_bytes, fail_closed_on_finalize },
+            StreamGateConfig {
+                budget_ms,
+                window_bytes,
+                fail_closed_on_finalize,
+            },
         );
         Ok(Self { index: arc, gate })
     }
@@ -65,4 +81,3 @@ impl PyStreamGate {
         Ok(decision_to_py(self.gate.finalize()))
     }
 }
-

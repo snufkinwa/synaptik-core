@@ -10,17 +10,17 @@ use std::num::NonZeroU32;
 
 use summary::{Language, Summarizer};
 
+use crate::commands::init::ensure_initialized_once;
 use crate::config::PoliciesConfig;
 use crate::services::archivist::Archivist;
 use crate::services::audit::record_action;
 use crate::services::memory::Memory;
-use crate::commands::init::ensure_initialized_once;
 
 // Contracts integration (SimCapsules)
-use contracts::api::{Purpose};
-use contracts::capsule::{SimCapsule, CapsuleMeta, CapsuleSource};
+use crate::services::reward::{RewardEvent, RewardSink, RewardSqliteSink};
+use contracts::api::Purpose;
+use contracts::capsule::{CapsuleMeta, CapsuleSource, SimCapsule};
 use contracts::store::ContractsStore;
-use crate::services::reward::{RewardSqliteSink, RewardEvent, RewardSink};
 use once_cell::sync::OnceCell;
 
 #[derive(Debug)]
@@ -47,7 +47,9 @@ impl Librarian {
     }
 
     fn contracts_store_ref(&self) -> Option<&ContractsStore> {
-        if let Some(ref s) = self.contracts { return Some(s); }
+        if let Some(ref s) = self.contracts {
+            return Some(s);
+        }
         contracts_store()
     }
 
@@ -114,13 +116,17 @@ impl Librarian {
                     let s = if s.len() > MAX_SUMMARY_LEN {
                         // Truncate on character boundary to avoid slicing in middle of UTF-8 codepoint.
                         s.chars().take(MAX_SUMMARY_LEN).collect::<String>()
-                    } else { s };
+                    } else {
+                        s
+                    };
                     for t in s.split(|c: char| !c.is_alphanumeric()) {
                         let t = t.to_lowercase();
                         if t.len() >= 3 {
                             *freq.entry(t).or_default() += 1;
                             tokens_seen += 1;
-                            if tokens_seen >= MAX_TOKENS_TOTAL { break 'outer; }
+                            if tokens_seen >= MAX_TOKENS_TOTAL {
+                                break 'outer;
+                            }
                         }
                     }
                 }
@@ -190,48 +196,58 @@ impl Librarian {
             let store_clone = store.clone();
             let mem_id = memory_id.clone();
             let lobe_clone = lobe.to_string();
-            if let Err(e) = std::thread::Builder::new().name("capsule_ingest".into()).spawn(move || {
-                match store_clone.ingest_capsule(cap) {
-                    Ok(handle) => {
-                        if let Err(map_err) = store_clone.map_memory(&mem_id, &handle.id) {
+            if let Err(e) = std::thread::Builder::new()
+                .name("capsule_ingest".into())
+                .spawn(move || {
+                    match store_clone.ingest_capsule(cap) {
+                        Ok(handle) => {
+                            if let Err(map_err) = store_clone.map_memory(&mem_id, &handle.id) {
+                                record_action(
+                                    "librarian",
+                                    "capsule_map_error",
+                                    &json!({"memory_id": mem_id, "error": map_err.to_string()}),
+                                    "medium",
+                                );
+                            }
+
+                            // Shaping reward for Real capsule ingest (small positive). Best-effort.
+                            if let Ok(sink) = RewardSqliteSink::open_default() {
+                                let ev = RewardEvent {
+                                    lobe: lobe_clone.clone(),
+                                    capsule_id: handle.id.clone(),
+                                    parent_id: None,
+                                    value: 0.05,
+                                    ts_ms: now_ms as i64,
+                                    labels: vec!["ingest".into()],
+                                    verdict: "Real".into(),
+                                    risk: 0.0,
+                                };
+                                let _ = sink.publish(&ev);
+                            }
+
+                            // Assemble a step anchored to this new state; next state inferred if any.
+                            if let Ok(asm) = crate::services::learner::StepAssembler::open_default()
+                            {
+                                let _ = asm.record_from_reward(
+                                    &lobe_clone,
+                                    &mem_id,
+                                    &handle.id,
+                                    0.05,
+                                    now_ms as i64,
+                                );
+                            }
+                        }
+                        Err(err) => {
                             record_action(
                                 "librarian",
-                                "capsule_map_error",
-                                &json!({"memory_id": mem_id, "error": map_err.to_string()}),
+                                "capsule_ingest_error",
+                                &json!({"memory_id": mem_id, "error": err.to_string()}),
                                 "medium",
                             );
                         }
-
-                        // Shaping reward for Real capsule ingest (small positive). Best-effort.
-                        if let Ok(sink) = RewardSqliteSink::open_default() {
-                            let ev = RewardEvent {
-                                lobe: lobe_clone.clone(),
-                                capsule_id: handle.id.clone(),
-                                parent_id: None,
-                                value: 0.05,
-                                ts_ms: now_ms as i64,
-                                labels: vec!["ingest".into()],
-                                verdict: "Real".into(),
-                                risk: 0.0,
-                            };
-                            let _ = sink.publish(&ev);
-                        }
-
-                        // Assemble a step anchored to this new state; next state inferred if any.
-                        if let Ok(asm) = crate::services::learner::StepAssembler::open_default() {
-                            let _ = asm.record_from_reward(&lobe_clone, &mem_id, &handle.id, 0.05, now_ms as i64);
-                        }
                     }
-                    Err(err) => {
-                        record_action(
-                            "librarian",
-                            "capsule_ingest_error",
-                            &json!({"memory_id": mem_id, "error": err.to_string()}),
-                            "medium",
-                        );
-                    }
-                }
-            }) {
+                })
+            {
                 record_action(
                     "librarian",
                     "spawn_error",
@@ -369,7 +385,8 @@ fn contracts_store() -> Option<&'static ContractsStore> {
             Some(dir) => ContractsStore::new(dir).ok(),
             None => None,
         }
-    }).as_ref()
+    })
+    .as_ref()
 }
 
 #[derive(Debug, Clone)]

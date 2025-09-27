@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use blake3;
 use std::{
     borrow::Cow,
     fs,
@@ -22,14 +21,15 @@ pub fn default_contract_text(name: &str) -> Option<&'static str> {
 /// Returns a list of files that were created.
 pub fn write_default_contracts(dir: impl AsRef<Path>) -> Result<Vec<String>> {
     let dir = dir.as_ref();
-    fs::create_dir_all(dir).with_context(|| format!("create_dir_all({:?})", dir))?;
+    fs::create_dir_all(dir).with_context(|| format!("create_dir_all({dir:?})"))?;
 
     let mut created = Vec::new();
 
-    for (name, text) in [(NONVIOLENCE_TOML_NAME, NONVIOLENCE_TOML)] {
+    {
+        let (name, text) = (NONVIOLENCE_TOML_NAME, NONVIOLENCE_TOML);
         let path = dir.join(name);
         if !path.exists() {
-            fs::write(&path, text).with_context(|| format!("write {:?}", path))?;
+            fs::write(&path, text).with_context(|| format!("write {path:?}"))?;
             created.push(name.to_string());
         }
     }
@@ -62,7 +62,7 @@ pub fn read_verified_or_embedded(
 
     // Try reading local file if present.
     if path.exists() {
-        let file_bytes = fs::read(path).with_context(|| format!("read {:?}", path))?;
+        let file_bytes = fs::read(path).with_context(|| format!("read {path:?}"))?;
         if let Some(embedded) = embedded_opt {
             let file_hash = blake3::hash(&file_bytes).to_hex().to_string();
             let embedded_hash = blake3::hash(embedded.as_bytes()).to_hex().to_string();
@@ -77,7 +77,7 @@ pub fn read_verified_or_embedded(
                     fs::create_dir_all(dir).ok();
                 }
                 fs::write(path, embedded)
-                    .with_context(|| format!("restore embedded {:?}", path))?;
+                    .with_context(|| format!("restore embedded {path:?}"))?;
                 return Ok(Cow::Borrowed(embedded));
             } else {
                 // Allow local edits in unlocked mode

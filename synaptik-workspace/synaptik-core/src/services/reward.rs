@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -36,7 +36,8 @@ impl RewardSqliteSink {
     }
 
     fn conn(&self) -> Result<Connection> {
-        Connection::open(&self.db_path).with_context(|| format!("open sqlite at {:?}", self.db_path))
+        Connection::open(&self.db_path)
+            .with_context(|| format!("open sqlite at {:?}", self.db_path))
     }
 
     fn init_schema(&self) -> Result<()> {

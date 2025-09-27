@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::commands::init::ensure_initialized_once;
 
@@ -13,14 +13,24 @@ pub struct TDLearner {
 impl TDLearner {
     pub fn open_default() -> Result<Self> {
         let cfg = ensure_initialized_once()?.config.clone();
-        Ok(Self { db_path: cfg.memory.cache_path, gamma: 0.95, alpha: 0.1 })
+        Ok(Self {
+            db_path: cfg.memory.cache_path,
+            gamma: 0.95,
+            alpha: 0.1,
+        })
     }
 
-    fn conn(&self) -> Result<Connection> { Ok(Connection::open(&self.db_path)?) }
+    fn conn(&self) -> Result<Connection> {
+        Ok(Connection::open(&self.db_path)?)
+    }
 
     /// Construct a learner bound to a specific SQLite path (primarily for tests/tools).
     pub fn open_at(db_path: std::path::PathBuf) -> Self {
-        Self { db_path, gamma: 0.95, alpha: 0.1 }
+        Self {
+            db_path,
+            gamma: 0.95,
+            alpha: 0.1,
+        }
     }
 
     fn get_value(&self, state_id: &str) -> Result<f32> {
@@ -30,12 +40,18 @@ impl TDLearner {
             Err(e) => {
                 // Only treat a missing table as benign; propagate other errors.
                 let msg = e.to_string();
-                if msg.contains("no such table") { return Ok(0.0); }
+                if msg.contains("no such table") {
+                    return Ok(0.0);
+                }
                 return Err(e.into());
             }
         };
         let mut rows = stmt.query([state_id])?;
-        if let Some(row) = rows.next()? { Ok(row.get::<_, f32>(0)?) } else { Ok(0.0) }
+        if let Some(row) = rows.next()? {
+            Ok(row.get::<_, f32>(0)?)
+        } else {
+            Ok(0.0)
+        }
     }
 
     fn upsert_value(&self, state_id: &str, value: f32) -> Result<()> {
@@ -51,7 +67,10 @@ impl TDLearner {
 
     pub fn td_update(&self, s: &str, r: f32, sp: Option<&str>) -> Result<f32> {
         let v_s = self.get_value(s)?;
-        let v_sp = match sp { Some(id) => self.get_value(id)?, None => 0.0 };
+        let v_sp = match sp {
+            Some(id) => self.get_value(id)?,
+            None => 0.0,
+        };
         let td_error = r + self.gamma * v_sp - v_s;
         let new_v = v_s + self.alpha * td_error;
         self.upsert_value(s, new_v)?;
@@ -68,14 +87,22 @@ pub struct StepAssembler {
 impl StepAssembler {
     pub fn open_default() -> Result<Self> {
         let cfg = ensure_initialized_once()?.config.clone();
-        Ok(Self { db_path: cfg.memory.cache_path.clone(), learner: TDLearner::open_default()? })
+        Ok(Self {
+            db_path: cfg.memory.cache_path.clone(),
+            learner: TDLearner::open_default()?,
+        })
     }
 
-    fn conn(&self) -> Result<Connection> { Ok(Connection::open(&self.db_path)?) }
+    fn conn(&self) -> Result<Connection> {
+        Ok(Connection::open(&self.db_path)?)
+    }
 
     /// Construct an assembler bound to a specific SQLite path (primarily for tests/tools).
     pub fn open_at(db_path: std::path::PathBuf) -> Result<Self> {
-        Ok(Self { db_path: db_path.clone(), learner: TDLearner::open_at(db_path) })
+        Ok(Self {
+            db_path: db_path.clone(),
+            learner: TDLearner::open_at(db_path),
+        })
     }
 
     pub fn record_step(
@@ -117,10 +144,21 @@ impl StepAssembler {
             "SELECT memory_id FROM memories WHERE lobe=?1 AND updated_at > ?2 ORDER BY updated_at ASC LIMIT 1",
         )?;
         let mut rows = stmt.query(params![lobe, ts_rfc3339])?;
-        let next_state_opt: Option<String> = if let Some(row) = rows.next()? { Some(row.get(0)?) } else { None };
+        let next_state_opt: Option<String> = if let Some(row) = rows.next()? {
+            Some(row.get(0)?)
+        } else {
+            None
+        };
 
         match next_state_opt.as_deref() {
-            Some(sprime) => self.record_step(lobe, state_id, action_capsule_id, reward, Some(sprime), ts_ms),
+            Some(sprime) => self.record_step(
+                lobe,
+                state_id,
+                action_capsule_id,
+                reward,
+                Some(sprime),
+                ts_ms,
+            ),
             None => self.record_step(lobe, state_id, action_capsule_id, reward, None, ts_ms),
         }
     }

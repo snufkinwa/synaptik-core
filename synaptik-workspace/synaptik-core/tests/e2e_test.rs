@@ -13,14 +13,14 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use synaptik_core::commands::Commands;
+use synaptik_core::config::CompactionPolicy;
 use synaptik_core::services::archivist::Archivist;
+use synaptik_core::services::compactor::Compactor;
+use synaptik_core::services::learner::StepAssembler;
 use synaptik_core::services::librarian::{Librarian, LibrarianSettings};
 use synaptik_core::services::memory::Memory;
-use synaptik_core::utils::pons::PonsStore;
-use synaptik_core::services::compactor::Compactor;
-use synaptik_core::config::CompactionPolicy;
-use synaptik_core::services::learner::StepAssembler;
 use synaptik_core::services::reward::RewardSqliteSink;
+use synaptik_core::utils::pons::PonsStore;
 
 use synaptik_core::commands::ensure_initialized_once;
 
@@ -885,43 +885,73 @@ fn e2e_rl_values_bias_recall_and_compaction() {
     // Use the canonical environment but disable runtime gating for memory writes.
     let mut cfg = ensure_initialized_once().expect("init").config.clone();
     cfg.services.ethos_enabled = false;
-    let cmds = Commands::builder().expect("builder").with_config(cfg.clone()).build().expect("commands");
+    let cmds = Commands::builder()
+        .expect("builder")
+        .with_config(cfg.clone())
+        .build()
+        .expect("commands");
 
     // Open Memory directly on the canonical DB for service-level calls.
     let db_path = cfg.memory.cache_path.clone();
     let mem = Memory::open(db_path.to_str().unwrap()).expect("mem open");
 
     // Unique lobe for this test
-    let ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let lobe = format!("rl_e2e_{}", ns);
 
     // Seed three memories: two safe, one risky to trigger negative reward during compaction.
     let id_safe1 = format!("{}_s1", lobe);
     let id_risky = format!("{}_rk", lobe);
     let id_safe2 = format!("{}_s2", lobe);
-    mem.remember(&id_safe1, &lobe, "a", b"I like study schedules and helpful notes.").expect("safe1");
+    mem.remember(
+        &id_safe1,
+        &lobe,
+        "a",
+        b"I like study schedules and helpful notes.",
+    )
+    .expect("safe1");
     std::thread::sleep(Duration::from_millis(3));
-    mem.remember(&id_risky, &lobe, "b", b"I want to kill her").expect("risky");
+    mem.remember(&id_risky, &lobe, "b", b"I want to kill her")
+        .expect("risky");
     std::thread::sleep(Duration::from_millis(3));
-    mem.remember(&id_safe2, &lobe, "c", b"Workout routine and healthy meals.").expect("safe2");
+    mem.remember(&id_safe2, &lobe, "c", b"Workout routine and healthy meals.")
+        .expect("safe2");
 
     // Run compaction on the lobe (not dry run). This will ingest Derived capsules, annotate, publish rewards,
     // assemble TD steps, and update values.
     let policy = CompactionPolicy::default();
-    let comp = Compactor { memory: &mem, pons: None };
+    let comp = Compactor {
+        memory: &mem,
+        pons: None,
+    };
     let _report = comp.compact_lobe(&lobe, &policy, false).expect("compact");
 
     // Wait until values for both ids are present (best-effort, short timeout)
     let start = std::time::Instant::now();
     loop {
         let have_safe: Option<f32> = open_sqlite(&db_path)
-            .query_row("SELECT value FROM \"values\" WHERE state_id=?1", [&id_safe1], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM \"values\" WHERE state_id=?1",
+                [&id_safe1],
+                |r| r.get(0),
+            )
             .ok();
         let have_risky: Option<f32> = open_sqlite(&db_path)
-            .query_row("SELECT value FROM \"values\" WHERE state_id=?1", [&id_risky], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM \"values\" WHERE state_id=?1",
+                [&id_risky],
+                |r| r.get(0),
+            )
             .ok();
-        if have_safe.is_some() && have_risky.is_some() { break; }
-        if start.elapsed() > Duration::from_millis(1500) { break; }
+        if have_safe.is_some() && have_risky.is_some() {
+            break;
+        }
+        if start.elapsed() > Duration::from_millis(1500) {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
 
@@ -936,30 +966,63 @@ fn e2e_rl_values_bias_recall_and_compaction() {
 
     // Learned values: safe should exceed risky
     let v_safe: f32 = open_sqlite(&db_path)
-        .query_row("SELECT value FROM \"values\" WHERE state_id=?1", [&id_safe1], |r| r.get(0))
+        .query_row(
+            "SELECT value FROM \"values\" WHERE state_id=?1",
+            [&id_safe1],
+            |r| r.get(0),
+        )
         .expect("v_safe");
     let v_risky: f32 = open_sqlite(&db_path)
-        .query_row("SELECT value FROM \"values\" WHERE state_id=?1", [&id_risky], |r| r.get(0))
+        .query_row(
+            "SELECT value FROM \"values\" WHERE state_id=?1",
+            [&id_risky],
+            |r| r.get(0),
+        )
         .expect("v_risky");
-    assert!(v_safe > v_risky, "expected safe > risky (v_safe={}, v_risky={})", v_safe, v_risky);
+    assert!(
+        v_safe > v_risky,
+        "expected safe > risky (v_safe={}, v_risky={})",
+        v_safe,
+        v_risky
+    );
 
     // Value-aware recall (best-effort): higher-value ids should come first in results.
     // Note: order can be influenced by missing values or ties; we primarily assert the learned values above.
     let ids = vec![id_risky.clone(), id_safe1.clone()];
-    let _hits = cmds.recall_many(&ids, synaptik_core::commands::Prefer::Auto).expect("recall_many");
+    let _hits = cmds
+        .recall_many(&ids, synaptik_core::commands::Prefer::Auto)
+        .expect("recall_many");
 
     // Value-aware compaction selection: lower-value first.
-    let candidates = mem.select_compaction_candidates(&lobe, 10, false).expect("cands");
-    let pos_risky = candidates.iter().position(|c| c.id == id_risky).expect("risky cand");
-    let pos_safe1 = candidates.iter().position(|c| c.id == id_safe1).expect("safe1 cand");
-    assert!(pos_risky < pos_safe1, "low-value (risky) should be prioritized for compaction");
+    let candidates = mem
+        .select_compaction_candidates(&lobe, 10, false)
+        .expect("cands");
+    let pos_risky = candidates
+        .iter()
+        .position(|c| c.id == id_risky)
+        .expect("risky cand");
+    let pos_safe1 = candidates
+        .iter()
+        .position(|c| c.id == id_safe1)
+        .expect("safe1 cand");
+    assert!(
+        pos_risky < pos_safe1,
+        "low-value (risky) should be prioritized for compaction"
+    );
 
     // Ensure archive flag is set; if compactor didn't promote, do a linear promotion now.
-    if mem.get_archived_cid(&id_safe1).expect("archived cid query").is_none() {
+    if mem
+        .get_archived_cid(&id_safe1)
+        .expect("archived cid query")
+        .is_none()
+    {
         let _ = mem.promote_all_hot_in_lobe(&lobe).expect("promote hot");
     }
     let archived_cid = mem.get_archived_cid(&id_safe1).expect("archived cid query");
-    assert!(archived_cid.is_some(), "archived_cid should be set after compaction");
+    assert!(
+        archived_cid.is_some(),
+        "archived_cid should be set after compaction"
+    );
 }
 /// Replay mode: recall a snapshot by hash, diverge a named path, and extend it.
 #[test]
@@ -1132,7 +1195,10 @@ fn compactor_compacts_and_reports_ethos() {
         .expect("remember bad");
 
     // Run compactor with heuristic summarizer; do not archive to DAG (keep it simple)
-    let comp = synaptik_core::services::compactor::Compactor { memory: &mem, pons: None };
+    let comp = synaptik_core::services::compactor::Compactor {
+        memory: &mem,
+        pons: None,
+    };
     let policy = synaptik_core::config::CompactionPolicy {
         select_top_k: Some(50),
         prefer_rarely_accessed: false,
@@ -1166,7 +1232,10 @@ fn compactor_compacts_and_reports_ethos() {
             |r| r.get(0),
         )
         .ok();
-    assert!(good_sum.is_some(), "benign row should have a summary after compaction");
+    assert!(
+        good_sum.is_some(),
+        "benign row should have a summary after compaction"
+    );
 
     // Harmful row should not have summary set (still NULL)
     let bad_sum: Option<String> = conn
@@ -1176,7 +1245,10 @@ fn compactor_compacts_and_reports_ethos() {
             |r| r.get(0),
         )
         .ok();
-    assert!(bad_sum.is_none(), "rejected row should not have summary set");
+    assert!(
+        bad_sum.is_none(),
+        "rejected row should not have summary set"
+    );
 }
 
 /// Pons store should write bytes + metadata and round-trip via latest helpers.

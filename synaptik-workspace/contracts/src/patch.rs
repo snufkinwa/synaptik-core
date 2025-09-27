@@ -23,4 +23,3 @@ pub struct PatchPlan {
     #[serde(default)]
     pub alt_artifacts: HashMap<String, String>,
 }
-

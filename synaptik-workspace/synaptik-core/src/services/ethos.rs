@@ -51,11 +51,11 @@ pub struct Proposal {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConstraintSpec {
     #[serde(default)]
-    pub mask_rules: Vec<String>,       // regex or literal patterns (we use literal substrings in MVP)
+    pub mask_rules: Vec<String>, // regex or literal patterns (we use literal substrings in MVP)
     #[serde(default)]
-    pub allow_tools: Vec<String>,      // tool names
+    pub allow_tools: Vec<String>, // tool names
     #[serde(default)]
-    pub stop_phrases: Vec<String>,     // early stop triggers
+    pub stop_phrases: Vec<String>, // early stop triggers
     #[serde(default = "ConstraintSpec::default_max_tokens")]
     pub max_tokens: usize,
     #[serde(default = "ConstraintSpec::default_temperature_cap")]
@@ -63,8 +63,12 @@ pub struct ConstraintSpec {
 }
 
 impl ConstraintSpec {
-    fn default_max_tokens() -> usize { 256 }
-    fn default_temperature_cap() -> f32 { 0.7 }
+    fn default_max_tokens() -> usize {
+        256
+    }
+    fn default_temperature_cap() -> f32 {
+        0.7
+    }
 }
 
 /// Runtime decision emitted by an ethos contract.
@@ -89,13 +93,15 @@ pub struct ContractsDecider;
 impl EthosContract for ContractsDecider {
     fn evaluate(&self, p: &Proposal) -> RuntimeDecision {
         // Always evaluate contracts; no disable path.
-        let cfg = ensure_initialized_once().map(|r| r.config.clone()).unwrap_or_default();
+        let cfg = ensure_initialized_once()
+            .map(|r| r.config.clone())
+            .unwrap_or_default();
         let default_name = Some(cfg.contracts.default_contract.clone());
         let eval = match crate::services::audit::evaluate_and_audit_contract(
             &ContractEvalMeta {
                 kind: "Ethics".into(),
                 contract_name: default_name,
-                metadata: json!({ "intent": p.intent }),
+                metadata: json!({ "intent": p.intent }), // borrow to avoid moving from &Proposal
             },
             &p.input,
         ) {
@@ -144,7 +150,6 @@ impl EthosContract for ContractsDecider {
 /// * Writes a normalized ethics decision entry to the logbook via [`record_ethics_decision`].
 /// * Also logs the raw contract evaluations (risk + ethics) via [`evaluate_and_audit_contract`].
 pub fn precheck(candidate_text: &str, intent_label: &str) -> Result<EthosVerdict, String> {
-
     // 1) Risk assessment
     let risk_val = evaluate_and_audit_contract(
         &ContractEvalMeta {

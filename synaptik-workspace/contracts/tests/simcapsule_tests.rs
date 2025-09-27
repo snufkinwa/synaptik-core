@@ -1,11 +1,14 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use contracts::api::{CapsAnnot, Verdict, Purpose};
-use contracts::capsule::{SimCapsule, CapsuleMeta, CapsuleSource};
+use contracts::api::{CapsAnnot, Purpose, Verdict};
+use contracts::capsule::{CapsuleMeta, CapsuleSource, SimCapsule};
 use contracts::store::ContractsStore;
 
 fn tmp_dir(name: &str) -> std::path::PathBuf {
-    let ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     std::env::temp_dir().join(format!("simcaps_{ns}_{name}"))
 }
 
@@ -44,13 +47,25 @@ fn simcapsule_ingest_annotate_and_gate() {
     assert!(!handle.hash.is_empty());
 
     // Gate should deny pending (no annotation yet)
-    let deny = store.gate_replay(&handle.id, Purpose::Replay).err().expect("deny pending");
+    let deny = store
+        .gate_replay(&handle.id, Purpose::Replay)
+        .err()
+        .expect("deny pending");
     assert_eq!(deny.reason, "annotation_pending");
 
     // Annotate allow and gate should pass
-    let ann = CapsAnnot { verdict: Verdict::Allow, risk: 0.0, labels: vec!["ok".into()], policy_ver: "test".into(), patch_id: None, ts_ms: now_ms };
+    let ann = CapsAnnot {
+        verdict: Verdict::Allow,
+        risk: 0.0,
+        labels: vec!["ok".into()],
+        policy_ver: "test".into(),
+        patch_id: None,
+        ts_ms: now_ms,
+    };
     store.annotate(&handle.id, &ann).expect("annotate");
-    store.gate_replay(&handle.id, Purpose::Replay).expect("gate allow");
+    store
+        .gate_replay(&handle.id, Purpose::Replay)
+        .expect("gate allow");
 
     // Map memory id to capsule id and resolve back
     let mem_id = "chat_abc".to_string();
