@@ -1,0 +1,6 @@
+{"t":"2025-09-27T00:00:00Z","op":"PUBLISH","channel":"alpha","uri":"file:///var/lib/synaptik/registry/packs/pack-alpha-1.json","key_id":"ethos/2025-09-r1","canon_hash":"blake3:..."}
+{"t":"2025-09-27T01:30:00Z","op":"DEPRECATE_VERSION","version":"alpha#0"}
+{"t":"2025-09-27T02:00:00Z","op":"PROMOTE","from":"alpha","to":"beta","version":"alpha#1"}
+{"t":"2025-09-27T03:10:00Z","op":"REVOKE_KEY","key_id":"ethos/2025-07-r1","reason":"compromise"}
+{"t":"2025-09-27T03:30:00Z","op":"REVOKE_ROOT","uuid":"00000000-0000-0000-0000-000000000000","reason":"lost"}
+{"t":"2025-09-27T06:00:00Z","op":"PROMOTE","from":"beta","to":"stable","version":"alpha#1"}

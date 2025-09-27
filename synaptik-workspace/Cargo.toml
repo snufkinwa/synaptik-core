@@ -3,5 +3,8 @@ members = [
   "synaptik-core",
   "contracts",
   "synaptik-core-py",
+  "synaptik-agent",
+  "contracts-signer",
+  "synaptik-admin",
 ]
 resolver = "2"

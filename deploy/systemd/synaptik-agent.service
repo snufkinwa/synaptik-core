@@ -1,0 +1,30 @@
+[Unit]
+Description=Synaptik contracts auto-updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/synaptik-agent --config /etc/synaptik/synaptik-agent.toml --once=false
+User=synaptik
+Group=synaptik
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallFilter=@system-service @file-system @io
+ReadWritePaths=/srv/app/.cogniv /var/lib/synaptik /etc/synaptik
+AmbientCapabilities=
+CapabilityBoundingSet=
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

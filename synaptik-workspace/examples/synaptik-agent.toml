@@ -1,0 +1,11 @@
+# Example agent config
+roots = ["/srv/app/.cogniv", "/home/runner/.cogniv"]
+registry_uri = "/var/lib/synaptik/registry.jsonl"  # or file:///path/to/registry.jsonl or pack.json
+trusted_pubkey_hex = "ed25519:0000000000000000000000000000000000000000000000000000000000000000"
+interval_seconds = 900
+allow_reinstatement_if_bind_fails = true
+channel = "stable"
+dry_run = true
+require_locked = true
+max_atp_per_apply = 200
+max_atp_per_day = 2000

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run synaptik-agent periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=synaptik-agent.service
+
+[Install]
+WantedBy=timers.target
+

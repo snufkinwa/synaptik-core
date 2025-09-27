@@ -1,0 +1,36 @@
+name: Build and publish contract pack
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build contracts-signer
+        run: |
+          cd synaptik-workspace
+          cargo build -p contracts-signer --release
+      - name: Make pack
+        env:
+          SK_HEX: ${{ secrets.CONTRACTS_SIGN_SK_HEX }}
+          KEY_ID: ${{ vars.CONTRACTS_SIGN_KEY_ID }}
+        run: |
+          cd synaptik-workspace
+          mkdir -p artifacts
+          ./target/release/contracts-signer \
+            --dir contracts/assets \
+            --out artifacts/contract-pack.json \
+            --sk-hex "$SK_HEX" \
+            --key-id "$KEY_ID"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-pack
+          path: synaptik-workspace/artifacts/contract-pack.json
+

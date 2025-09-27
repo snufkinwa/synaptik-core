@@ -6,6 +6,7 @@ pub mod replay;
 pub mod recall;
 pub mod pons;
 pub mod init;
+pub mod contracts;
 
 use serde::Serialize;
 

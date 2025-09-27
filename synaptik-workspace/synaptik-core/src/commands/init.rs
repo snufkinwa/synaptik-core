@@ -7,6 +7,7 @@ use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use contracts::assets::write_default_contracts;
 
@@ -48,6 +49,9 @@ pub fn ensure_initialized() -> Result<InitReport> {
     ensure_dir(&root, "", &mut created, &mut existed)?;
     ensure_dir(&root, "refs", &mut created, &mut existed)?;
     ensure_dir(&root, "objects", &mut created, &mut existed)?;
+
+    // Persistent root UUID for fleet-wide addressing
+    ensure_root_uuid(&root, &mut created, &mut existed)?;
 
     // HEAD ref (Git-like)
     ensure_file(
@@ -141,6 +145,19 @@ fn ensure_file(
         write_atomic(&p, b"")?;
     }
     created.push(rel_file.to_string());
+    Ok(())
+}
+
+fn ensure_root_uuid(base: &Path, created: &mut Vec<String>, existed: &mut Vec<String>) -> Result<()> {
+    let rel = "uuid";
+    let p = base.join(rel);
+    if p.exists() {
+        existed.push(rel.to_string());
+        return Ok(());
+    }
+    let id = Uuid::new_v4().to_string();
+    write_atomic(&p, id.as_bytes())?;
+    created.push(rel.to_string());
     Ok(())
 }
 
