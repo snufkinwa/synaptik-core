@@ -54,7 +54,7 @@ impl RewardSqliteSink {
                 risk REAL NOT NULL,
                 labels_json TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS values (
+            CREATE TABLE IF NOT EXISTS "values" (
                 state_id TEXT PRIMARY KEY,
                 value REAL NOT NULL,
                 updated_ms INTEGER NOT NULL
@@ -105,4 +105,3 @@ pub fn reward_from_annotation(ann: &CapsAnnot) -> f32 {
     }
     base + bonus + risk_penalty
 }
-
