@@ -76,8 +76,7 @@ pub fn read_verified_or_embedded(
                 if let Some(dir) = path.parent() {
                     fs::create_dir_all(dir).ok();
                 }
-                fs::write(path, embedded)
-                    .with_context(|| format!("restore embedded {path:?}"))?;
+                fs::write(path, embedded).with_context(|| format!("restore embedded {path:?}"))?;
                 return Ok(Cow::Borrowed(embedded));
             } else {
                 // Allow local edits in unlocked mode

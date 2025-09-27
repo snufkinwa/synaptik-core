@@ -98,9 +98,7 @@ fn registry_init(
         .create(true)
         .append(true)
         .open(&reg)
-        .and_then(|mut f| {
-            std::io::Write::write_all(&mut f, format!("{ev}\n").as_bytes())
-        })
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{ev}\n").as_bytes()))
         .with_context(|| format!("append registry event to {:?}", reg))?;
     println!("initialized registry at {}", reg.display());
     Ok(())
@@ -120,9 +118,7 @@ fn registry_promote(out: &str, from: &str, to: &str, version: &str) -> Result<()
         .create(true)
         .append(true)
         .open(&reg)
-        .and_then(|mut f| {
-            std::io::Write::write_all(&mut f, format!("{ev}\n").as_bytes())
-        })
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{ev}\n").as_bytes()))
         .context("append registry")?;
     println!("promoted {from} -> {to} version {version}");
     Ok(())

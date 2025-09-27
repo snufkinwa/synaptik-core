@@ -125,8 +125,7 @@ pub fn uuidv7() -> String {
         bytes[8] = (bytes[8] & 0x3F) | 0x80; // variant
 
         fn hex(b: &[u8]) -> String {
-            b.iter().map(|v| format!("{v:02x}"))
-                .collect()
+            b.iter().map(|v| format!("{v:02x}")).collect()
         }
 
         return format!(
